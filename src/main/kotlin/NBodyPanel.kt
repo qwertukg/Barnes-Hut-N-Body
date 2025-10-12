@@ -251,7 +251,7 @@ class NBodyPanel : JPanel() {
         g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
         g2.drawString("Delta time [O/P] = ${Config.DT}", 10, 120)
         g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
-        g2.drawString("Debug mode = $showTree", 10, 160)
+        g2.drawString("Debug mode [D] = $showTree", 10, 160)
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 180)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 200)
 
