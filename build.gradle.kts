@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "2.2.20"
+    application
 }
 
 group = "kz.qwertukg"
@@ -16,6 +17,10 @@ dependencies {
 
 kotlin {
     jvmToolchain(18)
+}
+
+application {
+    mainClass.set("MainKt")
 }
 
 tasks.test {

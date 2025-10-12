@@ -5,13 +5,10 @@
 ## Быстрый старт
 
 1. Установите JDK 18 (подойдёт Temurin или любая совместимая сборка).
+2. 
 2. Выполните сборку через Gradle Wrapper:
    ```bash
-   ./gradlew build
-   ```
-3. Запустите собранный jar c главным классом `MainKt`:
-   ```bash
-   java -cp build/libs/Gravity2D_Barnes-Hutt_alg-1.0-SNAPSHOT.jar MainKt
+   ./gradlew run
    ```
    Также можно импортировать проект в IntelliJ IDEA и запустить `main()` из `Main.kt`.
 
