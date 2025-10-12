@@ -180,6 +180,19 @@ class BHTree(private val quad: Quad) {
             ch[3]!!.accumulateForce(b, theta2, acc)
         }
     }
+
+    /** Обойти все квадраты дерева (корень → потомки). */
+    fun visitQuads(visit: (Quad) -> Unit) {
+        visit(quad)
+        val ch = children
+        if (ch != null) {
+            ch[0]?.visitQuads(visit)
+            ch[1]?.visitQuads(visit)
+            ch[2]?.visitQuads(visit)
+            ch[3]?.visitQuads(visit)
+        }
+    }
+
 }
 
 /**
@@ -192,6 +205,14 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
     private var ax = DoubleArray(bodies.size)
     private var ay = DoubleArray(bodies.size)
 
+    /** Последнее построенное дерево (для отрисовки/отладки). */
+    private var lastTree: BHTree? = null
+
+    fun getTreeForDebug(): BHTree {
+        val t = lastTree
+        return t ?: buildTree().also { lastTree = it }
+    }
+
     /** Получить текущий неизменяемый список тел. */
     fun getBodies(): List<Body> = bodies
 
@@ -199,6 +220,7 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
     fun resetBodies(newBodies: MutableList<Body>) {
         bodies = newBodies
         if (ax.size != bodies.size) { ax = DoubleArray(bodies.size); ay = DoubleArray(bodies.size) }
+        lastTree = null // сброс кэша дерева
     }
 
     /**
@@ -262,5 +284,8 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
             bs[i].vx += ax[i] * dtHalf // второй «kick»: завершаем обновление скорости по X
             bs[i].vy += ay[i] * dtHalf // второй «kick»: завершаем обновление скорости по Y
         }
+
+        // сохранить дерево для рендера
+        lastTree = root
     }
 }

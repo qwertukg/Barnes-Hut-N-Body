@@ -32,6 +32,9 @@ class NBodyPanel : JPanel() {
     /** Базовая скорость по Y для кликовых дисков. */
     private val initialVY = 0.0
 
+    /** Показывать ли границы квадродерева. */
+    private var showTree = false
+
     /**
      * Сформировать стартовый набор тел: два кеплеровских диска с противоположным дрейфом.
      * Следуем рекомендациям DAML по симметричной постановке задачи.
@@ -179,6 +182,9 @@ class NBodyPanel : JPanel() {
         // Полный перезапуск текущей сцены (один диск по центру)
         bind("R") {  engine.resetBodies(defaultBodies()) }
         bind("ESCAPE") { exitProcess(0) }
+
+        // показать/скрыть границы квадродерева
+        bind("D") { showTree = !showTree; repaint() }
     }
 
     /** Один кадр визуализации и, при необходимости, шаг симуляции. */
@@ -216,6 +222,27 @@ class NBodyPanel : JPanel() {
             g2.stroke = oldStroke
         }
 
+        // границы квадродерева
+        if (showTree) {
+            val oldColor = g2.color
+            val oldStroke = g2.stroke
+            g2.color = Color(0, 255, 0, 180)
+            g2.stroke = BasicStroke(1f)
+
+            // Получаем последнее дерево (если пауза/старт — построим разок)
+            val tree = engine.getTreeForDebug()
+            tree.visitQuads { q ->
+                val x = (q.cx - q.h).toInt()
+                val y = (q.cy - q.h).toInt()
+                val s = (q.h * 2).toInt()
+                g2.drawLine(x, y, x, y+s)
+                g2.drawLine(x, y, x+s, y)
+            }
+
+            g2.color = oldColor
+            g2.stroke = oldStroke
+        }
+
         // HUD
         g2.color = Color(0, 255, 0)
         g2.drawString("SPACE — pause | R — reset space | MOUSE1 DRAG'N'DROP — add kepler disk | ESCAPE — exit", 10, 20)
@@ -224,8 +251,9 @@ class NBodyPanel : JPanel() {
         g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
         g2.drawString("Delta time [O/P] = ${Config.DT}", 10, 120)
         g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
-        g2.drawString("Softening = ${Config.SOFTENING}", 10, 160)
+        g2.drawString("Debug mode = $showTree", 10, 160)
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 180)
+        g2.drawString("Softening = ${Config.SOFTENING}", 10, 200)
 
         Toolkit.getDefaultToolkit().sync()
     }
