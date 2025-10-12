@@ -19,20 +19,36 @@ import kotlin.system.exitProcess
 //            (отображение, горячие клавиши, HUD)
 //     ЛКМ — создать новый Kepler-диск в точке клика
 // =======================================================
+
+/** Панель Swing, отвечающая за визуализацию и управление симуляцией Barnes–Hut. */
 class NBodyPanel : JPanel() {
 
 
     // drag state
+    /** Точка начала перетаскивания мышью. */
     private var dragStart: Point? = null
+
+    /** Текущее положение курсора во время перетаскивания. */
     private var dragCurrent: Point? = null
+
+    /** Перевод пикселей перетаскивания в скорость. */
     private val VEL_PER_PIXEL = 1   // 1 px перетаскивания = 0.05 ед. скорости (подбери под себя)
 
     // Базовые настройки для создаваемых кликом дисков
+    /** Радиус генерируемого кликом диска. */
     private val clickDiskRadius = 100.0
+
+    /** Базовая скорость по X для кликовых дисков. */
     private val initialVX = 0.0
+
+    /** Базовая скорость по Y для кликовых дисков. */
     private val initialVY = 0.0
 
     // Стартовая сцена
+    /**
+     * Сформировать стартовый набор тел: два кеплеровских диска с противоположным дрейфом.
+     * Следуем рекомендациям DAML по симметричной постановке задачи.
+     */
     fun defaultBodies(): MutableList<Body> {
         val s = 70.0  // s — модуль «дрейфовой» скорости диска (px/сек), задаёт движение всего диска целиком
 
@@ -63,9 +79,13 @@ class NBodyPanel : JPanel() {
     }
 
 
+    /** Движок симуляции для текущего множества тел. */
     private var engine = PhysicsEngine(defaultBodies())
 
+    /** Периодический таймер перерисовки и шагов симуляции. */
     private val timer = Timer(1) { tick() } // ~60 FPS (1ms таймер — частая перерисовка)
+
+    /** Флаг постановки симуляции на паузу. */
     private var paused = false
 
     init {
@@ -78,6 +98,7 @@ class NBodyPanel : JPanel() {
     }
 
     // ------ Мышь: ЛКМ добавляет новый диск в точке клика ------
+    /** Настроить обработку мыши для добавления новых дисков. */
     private fun setupMouse() {
         val mouse = object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
@@ -99,12 +120,12 @@ class NBodyPanel : JPanel() {
             }
             override fun mouseReleased(e: MouseEvent) {
                 if (e.button == MouseEvent.BUTTON1 && dragStart != null) {
-                    val start = dragStart!!
-                    val end = e.point ?: start
-                    val dx = (end.x - start.x).toDouble()
-                    val dy = (end.y - start.y).toDouble()
-                    val vx = dx * VEL_PER_PIXEL
-                    val vy = dy * VEL_PER_PIXEL
+                    val start = dragStart!! // сохранённая точка начала перетаскивания
+                    val end = e.point ?: start // конечная точка (или начало, если недоступно)
+                    val dx = (end.x - start.x).toDouble() // смещение по X
+                    val dy = (end.y - start.y).toDouble() // смещение по Y
+                    val vx = dx * VEL_PER_PIXEL // результирующая скорость по X
+                    val vy = dy * VEL_PER_PIXEL // результирующая скорость по Y
 
                     addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), Config.r, Config.n, vx, vy)
 
@@ -119,6 +140,15 @@ class NBodyPanel : JPanel() {
     }
 
 
+    /**
+     * Добавить новый кеплеровский диск по указанным параметрам.
+     * @param x координата центра по X.
+     * @param y координата центра по Y.
+     * @param r радиус диска.
+     * @param n число тел.
+     * @param vx добавочная скорость по X.
+     * @param vy добавочная скорость по Y.
+     */
     private fun addKeplerDiskAt(x: Double, y: Double, r: Double, n: Int, vx: Double = initialVY, vy: Double = initialVX) {
         // создаём новый диск в точке клика
         val newDisk = BodyFactory.makeKeplerDisk(
@@ -135,10 +165,11 @@ class NBodyPanel : JPanel() {
     }
 
     // ------ Клавиши ------
+    /** Настроить горячие клавиши для управления симуляцией. */
     private fun setupKeys() {
         fun bind(key: String, action: () -> Unit) {
-            val im = getInputMap(WHEN_IN_FOCUSED_WINDOW)
-            val am = actionMap
+            val im = getInputMap(WHEN_IN_FOCUSED_WINDOW) // карта привязок клавиш
+            val am = actionMap // карта действий панели
             im.put(KeyStroke.getKeyStroke(key), key)
             am.put(key, object : AbstractAction() {
                 override fun actionPerformed(e: java.awt.event.ActionEvent?) = action()
@@ -165,6 +196,7 @@ class NBodyPanel : JPanel() {
         bind("ESCAPE") { exitProcess(0) }
     }
 
+    /** Перезапустить сцену одним диском в центре. */
     private fun resetSingleCenterDisk(n: Int) {
         val newBodies = BodyFactory.makeKeplerDisk(
             nTotal = n,
@@ -178,12 +210,14 @@ class NBodyPanel : JPanel() {
     }
 
     // ------ Тик симуляции ------
+    /** Один кадр визуализации и, при необходимости, шаг симуляции. */
     private fun tick() {
         if (!paused) engine.step()
         repaint()
     }
 
     // ------ Рендер ------
+    /** Отрисовать все тела и служебные элементы HUD. */
     override fun paintComponent(g: Graphics) {
         super.paintComponent(g)
         val g2 = g as Graphics2D
