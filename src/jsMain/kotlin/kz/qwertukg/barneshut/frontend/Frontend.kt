@@ -37,9 +37,32 @@ private var dragCurrentX: Double? = null
 private var dragCurrentY: Double? = null
 
 fun main() {
+    enforceFullscreen()
     setupDom()
     connectWebSocket()
     window.addEventListener("resize", { resizeCanvas() })
+}
+
+private fun enforceFullscreen() {
+    val screen = window.screen
+    val availWidth = screen.availWidth
+    val availHeight = screen.availHeight
+    val availLeft = (screen.asDynamic().availLeft as? Int) ?: 0
+    val availTop = (screen.asDynamic().availTop as? Int) ?: 0
+
+    runCatching { window.moveTo(availLeft, availTop) }
+    runCatching { window.resizeTo(availWidth, availHeight) }
+
+    val documentElement = document.documentElement ?: return
+    val fullscreenElement = document.asDynamic().fullscreenElement
+    if (fullscreenElement == null) {
+        val requestFullscreen = (documentElement.asDynamic().requestFullscreen
+            ?: documentElement.asDynamic().webkitRequestFullscreen
+            ?: documentElement.asDynamic().msRequestFullscreen)
+        if (requestFullscreen != null) {
+            runCatching { requestFullscreen.call(documentElement) }
+        }
+    }
 }
 
 private fun setupDom() {
@@ -61,7 +84,8 @@ private fun setupDom() {
         style.fontSize = "14px"
         style.whiteSpace = "pre"
         style.asDynamic().pointerEvents = "none"
-        textContent = "Подключение к симуляции..."
+        val resolution = "${window.screen.availWidth}×${window.screen.availHeight}"
+        textContent = "Разрешение экрана: $resolution\nПодключение к симуляции..."
     }
     document.body?.appendChild(hud)
 
