@@ -27,6 +27,7 @@ private val json = Json {
 
 private var currentFrame: ServerFrame? = null
 private var socket: WebSocket? = null
+private val pendingCommands = mutableListOf<ClientCommand>()
 private lateinit var canvas: HTMLCanvasElement
 private lateinit var ctx: CanvasRenderingContext2D
 private lateinit var hud: HTMLDivElement
@@ -115,6 +116,7 @@ private fun connectWebSocket() {
 
     ws.onopen = {
         sendViewport()
+        flushPendingCommands(ws)
         hud.textContent = "Соединение установлено, ожидание данных..."
     }
 
@@ -291,7 +293,30 @@ private fun sendViewport() {
 }
 
 private fun sendCommand(command: ClientCommand) {
-    val ws = socket ?: return
-    if (ws.readyState != WebSocket.OPEN) return
-    ws.send(json.encodeToString(ClientCommand.serializer(), command))
+    val ws = socket
+    if (ws != null && ws.readyState == WebSocket.OPEN) {
+        ws.send(json.encodeToString(ClientCommand.serializer(), command))
+    } else {
+        enqueueCommand(command)
+    }
+}
+
+private fun enqueueCommand(command: ClientCommand) {
+    if (command is ClientCommand.UpdateViewport) {
+        val lastViewportIndex = pendingCommands.indexOfLast { it is ClientCommand.UpdateViewport }
+        if (lastViewportIndex >= 0) {
+            pendingCommands[lastViewportIndex] = command
+            return
+        }
+    }
+    pendingCommands += command
+}
+
+private fun flushPendingCommands(ws: WebSocket) {
+    if (pendingCommands.isEmpty()) return
+    val encoded = pendingCommands.map { json.encodeToString(ClientCommand.serializer(), it) }
+    pendingCommands.clear()
+    for (payload in encoded) {
+        ws.send(payload)
+    }
 }
