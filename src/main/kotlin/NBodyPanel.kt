@@ -190,19 +190,6 @@ class NBodyPanel : JPanel() {
         bind("ESCAPE") { exitProcess(0) }
     }
 
-    /** Перезапустить сцену одним диском в центре. */
-    private fun resetSingleCenterDisk(n: Int) {
-        val newBodies = BodyFactory.makeKeplerDisk(
-            nTotal = n,
-            vx = 0.0,
-            vy = 0.0,
-            x = Config.WIDTH_PX * 0.5,
-            y = Config.HEIGHT_PX * 0.5,
-            r = clickDiskRadius
-        )
-        engine.resetBodies(newBodies)
-    }
-
     // ------ Тик симуляции ------
     /** Один кадр визуализации и, при необходимости, шаг симуляции. */
     private fun tick() {
