@@ -23,14 +23,10 @@ object Config {
     var theta: Double = 0.40  // Barnes–Hut θ
 
     /** Радиус создаваемого диска при клике. */
-    var r = 100.0
+    var R = 100.0
 
     /** Количество тел, добавляемых при создании нового диска. */
-    var n = 2000
-
-    // Начальные количества/массы
-    /** Количество тел в стартовой сцене. */
-    var BODIES_COUNT = 3000
+    var N = 2000
 
     /** Масса центрального тела кеплеровского диска. */
     const val CENTRAL_MASS = 50_000.0
@@ -42,9 +38,4 @@ object Config {
     /** Суммарная масса спутников кеплеровского диска. */
     const val TOTAL_SATELLITE_MASS = 1000.0
 
-    /** Список предопределённых сцен симуляции. */
-    enum class Scene { KEPLER_DISK, KEPLER_DISK_COLLIDER }
-
-    /** Текущая выбранная сцена. */
-    var scene: Scene = Scene.KEPLER_DISK
 }

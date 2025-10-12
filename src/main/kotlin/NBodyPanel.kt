@@ -121,7 +121,7 @@ class NBodyPanel : JPanel() {
                     val vx = dx * VEL_PER_PIXEL // результирующая скорость по X
                     val vy = dy * VEL_PER_PIXEL // результирующая скорость по Y
 
-                    addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), Config.r, Config.n, vx, vy)
+                    addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), Config.R, Config.N, vx, vy)
 
                     dragStart = null
                     dragCurrent = null
@@ -173,11 +173,11 @@ class NBodyPanel : JPanel() {
         bind("Z") { Config.theta = (Config.theta - 0.05).coerceAtLeast(0.2) }
         bind("X") { Config.theta = (Config.theta + 0.05).coerceAtMost(1.6) }
 
-        bind("A") { Config.n = (Config.n - 100).coerceAtLeast(1000) }
-        bind("S") { Config.n = (Config.n + 100).coerceAtMost(10000) }
+        bind("A") { Config.N = (Config.N - 100).coerceAtLeast(1000) }
+        bind("S") { Config.N = (Config.N + 100).coerceAtMost(10000) }
 
-        bind("Q") { Config.r = (Config.r - 10.0).coerceAtLeast(100.0) }
-        bind("W") { Config.r = (Config.r + 10.0).coerceAtMost(500.0) }
+        bind("Q") { Config.R = (Config.R - 10.0).coerceAtLeast(100.0) }
+        bind("W") { Config.R = (Config.R + 10.0).coerceAtMost(500.0) }
 
         bind("O") { Config.DT = (Config.DT - 0.001).coerceAtLeast(-0.015) }
         bind("P") { Config.DT = (Config.DT + 0.001).coerceAtMost(0.015) }
@@ -235,16 +235,16 @@ class NBodyPanel : JPanel() {
                 10f, floatArrayOf(6f, 6f), 0f
             )
             g2.drawLine(sx, sy, ex, ey)
-            val w = (Config.r * 2).toInt()
-            g2.drawArc(sx - Config.r.toInt(), sy - Config.r.toInt(), w, w, 0, 360)
+            val w = (Config.R * 2).toInt()
+            g2.drawArc(sx - Config.R.toInt(), sy - Config.R.toInt(), w, w, 0, 360)
             g2.stroke = oldStroke
         }
 
         // HUD
         g2.color = Color(0, 255, 0)
         g2.drawString("SPACE — pause | R — reset space | MOUSE1 DRAG'N'DROP — add kepler disk | ESCAPE — exit", 10, 20)
-        g2.drawString("Disk radius [Q/W] = ${Config.r}", 10, 60)
-        g2.drawString("Bodies count [A/S] = ${Config.n}", 10, 80)
+        g2.drawString("Disk radius [Q/W] = ${Config.R}", 10, 60)
+        g2.drawString("Bodies count [A/S] = ${Config.N}", 10, 80)
         g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
         g2.drawString("Delta time [O/P] = ${Config.DT}", 10, 120)
         g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
