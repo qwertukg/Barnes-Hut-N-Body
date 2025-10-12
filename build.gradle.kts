@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "2.2.20"
+    application
 }
 
 group = "kz.qwertukg"
@@ -20,4 +21,8 @@ kotlin {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+application {
+    mainClass.set("MainKt")
 }
