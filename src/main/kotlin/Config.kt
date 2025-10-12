@@ -3,10 +3,14 @@
 // =======================================================
 object Config {
     // Окно
-    const val WIDTH_PX = 2400
-    const val HEIGHT_PX = 800
+    var WIDTH_PX = 2400
+    var HEIGHT_PX = 800
 
     // Физика
+    const val COLLIDE_MAX_M = 10.0
+    const val COLLIDE_MAX_V = 0.0
+    const val COLLIDE_K = 0.1
+
     const val G = 80.0
     const val DT = 0.015
     const val SOFTENING = 1.0
@@ -14,7 +18,7 @@ object Config {
     var theta: Double = 0.40  // Barnes–Hut θ
 
     // Начальные количества/массы
-    var BODIES_COUNT = 10000
+    var BODIES_COUNT = 1000
     const val CENTRAL_MASS = 50_000.0
     const val MIN_R = 24.0
 

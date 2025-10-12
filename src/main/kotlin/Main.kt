@@ -1,14 +1,35 @@
+import java.awt.Toolkit
 import javax.swing.*
 
 fun main() {
-    SwingUtilities.invokeLater {
+    javax.swing.SwingUtilities.invokeLater {
         UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
-        JFrame("Barnes–Hut N-Body • Kotlin + Coroutines").apply {
-            defaultCloseOperation = JFrame.EXIT_ON_CLOSE
-            contentPane.add(NBodyPanel())
-            pack()
-            setLocationRelativeTo(null)
-            isVisible = true
+
+        val screen = Toolkit.getDefaultToolkit().screenSize
+        Config.WIDTH_PX = screen.width
+        Config.HEIGHT_PX = screen.height
+
+        val panel = NBodyPanel()
+
+        val frame = JFrame("Barnes–Hut N-Body • Kotlin + Coroutines")
+        frame.isUndecorated = true
+        frame.defaultCloseOperation = JFrame.EXIT_ON_CLOSE
+        frame.contentPane.add(panel)
+
+        val ge = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment()
+        val gd = ge.defaultScreenDevice
+
+        try {
+            if (gd.isFullScreenSupported) {
+                gd.fullScreenWindow = frame // эксклюзивный fullscreen
+            } else {
+                frame.extendedState = JFrame.MAXIMIZED_BOTH
+                frame.isVisible = true
+            }
+        } catch (_: Exception) {
+            // fallback
+            frame.extendedState = JFrame.MAXIMIZED_BOTH
+            frame.isVisible = true
         }
     }
 }
