@@ -8,6 +8,7 @@ import java.awt.RenderingHints
 import java.awt.Toolkit
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelEvent
 import javax.swing.AbstractAction
 import javax.swing.JPanel
 import javax.swing.KeyStroke
@@ -59,6 +60,7 @@ class NBodyPanel : JPanel() {
 
     private val timer = Timer(1) { tick() } // ~60 FPS (1ms таймер — частая перерисовка)
     private var paused = false
+    private var zoom = 1.0 // Initial zoom level
 
     init {
         preferredSize = Dimension(Config.WIDTH_PX, Config.HEIGHT_PX)
@@ -95,19 +97,29 @@ class NBodyPanel : JPanel() {
                     val end = e.point ?: start
                     val dx = (end.x - start.x).toDouble()
                     val dy = (end.y - start.y).toDouble()
-                    val vx = dx * VEL_PER_PIXEL
-                    val vy = dy * VEL_PER_PIXEL
+                    val vx = dx * VEL_PER_PIXEL / zoom
+                    val vy = dy * VEL_PER_PIXEL / zoom
 
-                    addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), Config.r, Config.n, vx, vy)
+                    addKeplerDiskAt(start.x.toDouble() / zoom, start.y.toDouble() / zoom, Config.r, Config.n, vx, vy)
 
                     dragStart = null
                     dragCurrent = null
                     repaint()
                 }
             }
+            override fun mouseWheelMoved(e: MouseWheelEvent) {
+                if (e.getWheelRotation() < 0) {
+                    zoom *= 1.1; // Zoom in
+                } else {
+                    zoom *= 0.9; // Zoom out
+                }
+                repaint(); // Repaint the panel
+            }
+
         }
         addMouseListener(mouse)
         addMouseMotionListener(mouse) // ← важно: иначе mouseDragged не придёт
+        addMouseWheelListener(mouse);
     }
 
 
@@ -181,27 +193,6 @@ class NBodyPanel : JPanel() {
         val g2 = g as Graphics2D
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
 
-        // Точки тел
-        for (b in engine.getBodies()) {
-            g2.color = if (b.m >= Config.CENTRAL_MASS) Color.BLACK else Color.WHITE
-            val ix = b.x.toInt(); val iy = b.y.toInt()
-            if (ix in 0 until width && iy in 0 until height) g2.drawLine(ix, iy, ix, iy)
-        }
-
-        // Линия от места нажатия до текущей позиции (drag preview)
-        if (dragStart != null && dragCurrent != null) {
-            val sx = dragStart!!.x; val sy = dragStart!!.y
-            val ex = dragCurrent!!.x; val ey = dragCurrent!!.y
-            val oldStroke = g2.stroke
-            g2.color = Color(0, 255, 0, 200)
-            g2.stroke = BasicStroke(
-                1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
-                10f, floatArrayOf(6f, 6f), 0f
-            )
-            g2.drawLine(sx, sy, ex, ey)
-            g2.stroke = oldStroke
-        }
-
         // HUD
         g2.color = Color(0, 255, 0)
         g2.drawString("SPACE — pause | R — reset space | MOUSE1 DRAG'N'DROP — add kepler disk | ESCAPE — exit", 10, 20)
@@ -212,6 +203,29 @@ class NBodyPanel : JPanel() {
         g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 160)
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 180)
+
+        g2.scale(zoom, zoom)
+
+        // Точки тел
+        for (b in engine.getBodies()) {
+            g2.color = if (b.m >= Config.CENTRAL_MASS) Color.BLACK else Color.WHITE
+            val ix = b.x.toInt(); val iy = b.y.toInt()
+            if (ix in 0 until (width / zoom).toInt() && iy in 0 until (height / zoom).toInt()) g2.drawLine(ix, iy, ix, iy)
+        }
+
+        // Линия от места нажатия до текущей позиции (drag preview)
+        if (dragStart != null && dragCurrent != null) {
+            val sx = (dragStart!!.x / zoom).toInt(); val sy = (dragStart!!.y / zoom).toInt()
+            val ex = (dragCurrent!!.x / zoom).toInt(); val ey = (dragCurrent!!.y / zoom).toInt()
+            val oldStroke = g2.stroke
+            g2.color = Color(0, 255, 0, 200)
+            g2.stroke = BasicStroke(
+                1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
+                10f, floatArrayOf(6f, 6f), 0f
+            )
+            g2.drawLine(sx, sy, ex, ey)
+            g2.stroke = oldStroke
+        }
 
         Toolkit.getDefaultToolkit().sync()
     }
