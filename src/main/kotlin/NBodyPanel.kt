@@ -173,8 +173,8 @@ class NBodyPanel : JPanel() {
         bind("Q") { Config.R = (Config.R - 10.0).coerceAtLeast(100.0) }
         bind("W") { Config.R = (Config.R + 10.0).coerceAtMost(500.0) }
 
-        bind("O") { Config.DT = (Config.DT - 0.001).coerceAtLeast(-0.015) }
-        bind("P") { Config.DT = (Config.DT + 0.001).coerceAtMost(0.015) }
+        bind("O") { Config.DT = (Config.DT - 0.001).coerceAtLeast(-0.05) }
+        bind("P") { Config.DT = (Config.DT + 0.001).coerceAtMost(0.05) }
 
         bind("K") { Config.G = (Config.G - 1.0).coerceAtLeast(0.0) }
         bind("L") { Config.G = (Config.G + 1.0).coerceAtMost(100.0) }
