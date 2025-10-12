@@ -25,9 +25,7 @@ class NBodyPanel : JPanel() {
     // drag state
     private var dragStart: Point? = null
     private var dragCurrent: Point? = null
-    private val showPreview = true
     private val VEL_PER_PIXEL = 1   // 1 px перетаскивания = 0.05 ед. скорости (подбери под себя)
-    private val MAX_SPAWN_SPEED = 100.0
 
     // Базовые настройки для создаваемых кликом дисков
     private val clickDiskRadius = 100.0
@@ -35,7 +33,29 @@ class NBodyPanel : JPanel() {
     private val initialVY = 0.0
 
     // Стартовая сцена: один статичный диск по центру окна
-    private var engine = PhysicsEngine(mutableListOf())
+    fun defaultBodies(): MutableList<Body> {
+        val s = 70.0
+        val disc1 = BodyFactory.makeKeplerDisk(
+            nTotal = 2000,
+            vx = s,
+            vy = 0.0,
+            x = Config.WIDTH_PX * 0.5,
+            y = Config.HEIGHT_PX * 0.4,
+            r = 100.0
+        )
+        val disc2 = BodyFactory.makeKeplerDisk(
+            nTotal = 2000,
+            vx = -s,
+            vy = 0.0,
+            x = Config.WIDTH_PX * 0.5,
+            y = Config.HEIGHT_PX * 0.6,
+            r = 100.0
+        )
+
+        return (disc1 + disc2).toMutableList()
+    }
+
+    private var engine = PhysicsEngine(defaultBodies())
 
     private val timer = Timer(1) { tick() } // ~60 FPS (1ms таймер — частая перерисовка)
     private var paused = false
@@ -133,7 +153,7 @@ class NBodyPanel : JPanel() {
         bind("L") { Config.G = (Config.G + 1.0).coerceAtMost(100.0) }
 
         // Полный перезапуск текущей сцены (один диск по центру)
-        bind("R") {  engine.resetBodies(mutableListOf()) }
+        bind("R") {  engine.resetBodies(defaultBodies()) }
         bind("ESCAPE") { exitProcess(0) }
     }
 
@@ -184,13 +204,14 @@ class NBodyPanel : JPanel() {
 
         // HUD
         g2.color = Color(0, 255, 0)
-        g2.drawString("SPACE — pause | R — reset space | MOUSE1 — add kepler disk | ESCAPE — exit", 10, 40)
+        g2.drawString("SPACE — pause | R — reset space | MOUSE1 DRAG'N'DROP — add kepler disk | ESCAPE — exit", 10, 20)
         g2.drawString("Disk radius [Q/W] = ${Config.r}", 10, 60)
         g2.drawString("Bodies count [A/S] = ${Config.n}", 10, 80)
         g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
         g2.drawString("Delta time [O/P] = ${Config.DT}", 10, 120)
         g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 160)
+        g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 180)
 
         Toolkit.getDefaultToolkit().sync()
     }

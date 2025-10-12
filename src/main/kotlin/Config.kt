@@ -15,7 +15,7 @@ object Config {
     var n = 2000
 
     // Начальные количества/массы
-    var BODIES_COUNT = 1000
+    var BODIES_COUNT = 3000
     const val CENTRAL_MASS = 50_000.0
     const val MIN_R = 24.0
 
