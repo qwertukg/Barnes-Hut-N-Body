@@ -17,8 +17,6 @@ import kotlin.system.exitProcess
 /** Панель Swing, отвечающая за визуализацию и управление симуляцией Barnes–Hut. */
 class NBodyPanel : JPanel() {
 
-
-    // drag state
     /** Точка начала перетаскивания мышью. */
     private var dragStart: Point? = null
 
@@ -34,7 +32,6 @@ class NBodyPanel : JPanel() {
     /** Базовая скорость по Y для кликовых дисков. */
     private val initialVY = 0.0
 
-    // Стартовая сцена
     /**
      * Сформировать стартовый набор тел: два кеплеровских диска с противоположным дрейфом.
      * Следуем рекомендациям DAML по симметричной постановке задачи.
@@ -44,23 +41,23 @@ class NBodyPanel : JPanel() {
 
         // Первый диск:
         val disc1 = BodyFactory.makeKeplerDisk(
-            nTotal = 4000,                 // nTotal — сколько тел создать в этом диске (включая центральное)
+            nTotal = Config.N,                 // nTotal — сколько тел создать в этом диске (включая центральное)
             vx = s,                        // vx — добавочный сдвиг скорости по X для всех тел диска (px/сек)
             vy = 0.0,                      // vy — добавочный сдвиг скорости по Y для всех тел диска (px/сек)
             x = Config.WIDTH_PX * 0.5,     // x — координата центра диска по X (в пикселях экрана)
             y = Config.HEIGHT_PX * 0.4,    // y — координата центра диска по Y (в пикселях экрана)
-            r = 100.0,                     // r — радиус диска (макс. расстояние частиц от центра) в пикселях
+            r = Config.R,                     // r — радиус диска (макс. расстояние частиц от центра) в пикселях
             clockwise = true              // clockwise — вращение по часовой
         )
 
         // Второй диск:
         val disc2 = BodyFactory.makeKeplerDisk(
-            nTotal = 4000,                 // число тел во втором диске
+            nTotal = Config.N,                 // число тел во втором диске
             vx = -s,                       // двигать диск влево (противоположное направление первому)
             vy = 0.0,                      // вертикального дрейфа нет
             x = Config.WIDTH_PX * 0.5,     // центр по X тот же
             y = Config.HEIGHT_PX * 0.6,    // центр по Y ниже, чтобы диски шли навстречу
-            r = 100.0,                      // радиус второго диска
+            r = Config.R,                      // радиус второго диска
             clockwise = true
         )
 
@@ -87,7 +84,6 @@ class NBodyPanel : JPanel() {
         timer.start()
     }
 
-    // ------ Мышь: ЛКМ добавляет новый диск в точке клика ------
     /** Настроить обработку мыши для добавления новых дисков. */
     private fun setupMouse() {
         val mouse = object : MouseAdapter() {
@@ -154,7 +150,6 @@ class NBodyPanel : JPanel() {
         engine.resetBodies(merged)
     }
 
-    // ------ Клавиши ------
     /** Настроить горячие клавиши для управления симуляцией. */
     private fun setupKeys() {
         fun bind(key: String, action: () -> Unit) {
@@ -186,14 +181,12 @@ class NBodyPanel : JPanel() {
         bind("ESCAPE") { exitProcess(0) }
     }
 
-    // ------ Тик симуляции ------
     /** Один кадр визуализации и, при необходимости, шаг симуляции. */
     private fun tick() {
         if (!paused) engine.step()
         repaint()
     }
 
-    // ------ Рендер ------
     /** Отрисовать все тела и служебные элементы HUD. */
     override fun paintComponent(g: Graphics) {
         super.paintComponent(g)

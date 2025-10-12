@@ -137,7 +137,6 @@ class BHTree(private val quad: Quad) {
         }
     }
 
-    // --- Быстрый расчёт точечной силы: минимум делений, без аллокаций ---
     /**
      * Быстрый расчёт точечной силы без лишних аллокаций.
      * @param b тело, на которое действует сила.
@@ -241,11 +240,9 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
 
     /** Один шаг Leapfrog (kick–drift–kick). */
     fun step() {
-        // a(t)
         var root = buildTree() // строим дерево для текущего положения
         runBlocking { computeAccelerations(root) } // вычисляем ускорения на текущий момент
 
-        // v(t+dt/2)
         val bs = bodies // список тел для удобного обращения
         val dtHalf = Config.DT * 0.5 // половина шага по времени
         for (i in bs.indices) {
@@ -253,17 +250,14 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
             bs[i].vy += ay[i] * dtHalf // первый «kick»: корректировка скорости по Y
         }
 
-        // x(t+dt)
         for (b in bs) {
             b.x += b.vx * Config.DT // «drift»: перенос по X
             b.y += b.vy * Config.DT // «drift»: перенос по Y
         }
 
-        // a(t+dt)
         root = buildTree() // дерево для обновлённых позиций
         runBlocking { computeAccelerations(root) } // ускорения на конце шага
 
-        // v(t+dt)
         for (i in bs.indices) {
             bs[i].vx += ax[i] * dtHalf // второй «kick»: завершаем обновление скорости по X
             bs[i].vy += ay[i] * dtHalf // второй «kick»: завершаем обновление скорости по Y
