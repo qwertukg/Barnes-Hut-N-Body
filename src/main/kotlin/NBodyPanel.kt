@@ -32,28 +32,34 @@ class NBodyPanel : JPanel() {
     private val initialVX = 0.0
     private val initialVY = 0.0
 
-    // Стартовая сцена: один статичный диск по центру окна
+    // Стартовая сцена
     fun defaultBodies(): MutableList<Body> {
-        val s = 70.0
+        val s = 70.0  // s — модуль «дрейфовой» скорости диска (px/сек), задаёт движение всего диска целиком
+
+        // Первый диск:
         val disc1 = BodyFactory.makeKeplerDisk(
-            nTotal = 2000,
-            vx = s,
-            vy = 0.0,
-            x = Config.WIDTH_PX * 0.5,
-            y = Config.HEIGHT_PX * 0.4,
-            r = 100.0
-        )
-        val disc2 = BodyFactory.makeKeplerDisk(
-            nTotal = 2000,
-            vx = -s,
-            vy = 0.0,
-            x = Config.WIDTH_PX * 0.5,
-            y = Config.HEIGHT_PX * 0.6,
-            r = 100.0
+            nTotal = 2000,                 // nTotal — сколько тел создать в этом диске (включая центральное)
+            vx = s,                        // vx — добавочный сдвиг скорости по X для всех тел диска (px/сек)
+            vy = 0.0,                      // vy — добавочный сдвиг скорости по Y для всех тел диска (px/сек)
+            x = Config.WIDTH_PX * 0.5,     // x — координата центра диска по X (в пикселях экрана)
+            y = Config.HEIGHT_PX * 0.4,    // y — координата центра диска по Y (в пикселях экрана)
+            r = 100.0                      // r — радиус диска (макс. расстояние частиц от центра) в пикселях
         )
 
+        // Второй диск:
+        val disc2 = BodyFactory.makeKeplerDisk(
+            nTotal = 2000,                 // число тел во втором диске
+            vx = -s,                       // двигать диск влево (противоположное направление первому)
+            vy = 0.0,                      // вертикального дрейфа нет
+            x = Config.WIDTH_PX * 0.5,     // центр по X тот же
+            y = Config.HEIGHT_PX * 0.6,    // центр по Y ниже, чтобы диски шли навстречу
+            r = 100.0                      // радиус второго диска
+        )
+
+        // Склеиваем оба списка тел в один
         return (disc1 + disc2).toMutableList()
     }
+
 
     private var engine = PhysicsEngine(defaultBodies())
 
