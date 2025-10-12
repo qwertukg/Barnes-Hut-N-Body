@@ -235,12 +235,14 @@ class NBodyPanel : JPanel() {
             val sx = dragStart!!.x; val sy = dragStart!!.y
             val ex = dragCurrent!!.x; val ey = dragCurrent!!.y
             val oldStroke = g2.stroke
-            g2.color = Color(0, 255, 0, 200)
+            g2.color = Color(0, 255, 0, 255)
             g2.stroke = BasicStroke(
-                1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
+                1.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
                 10f, floatArrayOf(6f, 6f), 0f
             )
             g2.drawLine(sx, sy, ex, ey)
+            val w = (Config.r * 2).toInt()
+            g2.drawArc(sx - Config.r.toInt(), sy - Config.r.toInt(), w, w, 0, 360)
             g2.stroke = oldStroke
         }
 
