@@ -15,6 +15,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 /** Состояние тела гравитационной системы Barnes–Hut. */
 data class Body(
@@ -25,8 +27,15 @@ data class Body(
     var m: Double
 )
 
+fun Double.round2(): Double {
+    val k = 10f.pow(2).toDouble()
+    return (this * k).roundToInt() / k
+}
+
 /** Преобразование серверного тела в сериализуемый снимок. */
-fun Body.toSnapshot(): BodySnapshot = BodySnapshot(x, y, vx, vy, m)
+fun Body.toSnapshot(): BodySnapshot {
+    return BodySnapshot(x.round2(), y.round2(), m.round2())
+}
 
 /** Аккумулятор для суммирования сил. */
 private class Acc {

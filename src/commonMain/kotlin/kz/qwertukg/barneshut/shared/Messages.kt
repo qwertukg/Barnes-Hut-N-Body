@@ -10,8 +10,6 @@ import kotlinx.serialization.Serializable
 data class BodySnapshot(
     val x: Double,
     val y: Double,
-    val vx: Double,
-    val vy: Double,
     val mass: Double
 )
 
