@@ -19,6 +19,9 @@ kotlin {
     js(IR) {
         browser {
             binaries.executable()
+            commonWebpackConfig {
+                outputFileName = "app.js"   // ← фиксируем имя
+            }
         }
     }
 
@@ -61,7 +64,14 @@ val jsBrowserProductionWebpack by tasks.existing(KotlinWebpack::class)
 
 tasks.named<Copy>("jvmProcessResources") {
     dependsOn(jsBrowserProductionWebpack)
+
+    // копируем бандлы JS
     from(jsBrowserProductionWebpack.flatMap { it.outputDirectory }) {
+        into("static")
+    }
+
+    // копируем index.html из jsMain в jvm-ресурсы
+    from("src/jsMain/resources/index.html") {
         into("static")
     }
 }
