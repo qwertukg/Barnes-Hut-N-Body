@@ -6,16 +6,13 @@ object Config {
     var WIDTH_PX = 2400
     var HEIGHT_PX = 800
 
-    // Физика
-    const val COLLIDE_MAX_M = 10.0
-    const val COLLIDE_MAX_V = 0.0
-    const val COLLIDE_K = 0.1
-
-    const val G = 80.0
-    const val DT = 0.015
-    const val SOFTENING = 1.0
+    var G = 80.0
+    var DT = 0.015
+    var SOFTENING = 1.0
     val SOFT2 = SOFTENING * SOFTENING
     var theta: Double = 0.40  // Barnes–Hut θ
+    var r = 100.0
+    var n = 2000
 
     // Начальные количества/массы
     var BODIES_COUNT = 1000

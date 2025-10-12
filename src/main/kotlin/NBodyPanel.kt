@@ -1,3 +1,4 @@
+import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Dimension
 import java.awt.Graphics
@@ -11,6 +12,7 @@ import javax.swing.AbstractAction
 import javax.swing.JPanel
 import javax.swing.KeyStroke
 import javax.swing.Timer
+import kotlin.system.exitProcess
 
 // =======================================================
 //                    В И З У А Л И З А Ц И Я
@@ -18,6 +20,7 @@ import javax.swing.Timer
 //     ЛКМ — создать новый Kepler-диск в точке клика
 // =======================================================
 class NBodyPanel : JPanel() {
+
 
     // drag state
     private var dragStart: Point? = null
@@ -48,23 +51,22 @@ class NBodyPanel : JPanel() {
 
     // ------ Мышь: ЛКМ добавляет новый диск в точке клика ------
     private fun setupMouse() {
-        addMouseListener(object : MouseAdapter() {
+        val mouse = object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
                 if (e.button == MouseEvent.BUTTON1) {
                     dragStart = e.point
                     dragCurrent = e.point
-//                    addKeplerDiskAt(e.x.toDouble(), e.y.toDouble(), 100.0, 2000)
+                    repaint()
                 }
                 if (e.button == MouseEvent.BUTTON2) {
-                    addKeplerDiskAt(e.x.toDouble(), e.y.toDouble(), 300.0, 4000)
-                }
-                if (e.button == MouseEvent.BUTTON3) {
                     engine.resetBodies(mutableListOf())
+                    repaint()
                 }
             }
             override fun mouseDragged(e: MouseEvent) {
                 if (dragStart != null) {
                     dragCurrent = e.point
+                    repaint()
                 }
             }
             override fun mouseReleased(e: MouseEvent) {
@@ -75,13 +77,19 @@ class NBodyPanel : JPanel() {
                     val dy = (end.y - start.y).toDouble()
                     val vx = dx * VEL_PER_PIXEL
                     val vy = dy * VEL_PER_PIXEL
-                    addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), 100.0, 2000, vx, vy)
+
+                    addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), Config.r, Config.n, vx, vy)
+
                     dragStart = null
                     dragCurrent = null
+                    repaint()
                 }
             }
-        })
+        }
+        addMouseListener(mouse)
+        addMouseMotionListener(mouse) // ← важно: иначе mouseDragged не придёт
     }
+
 
     private fun addKeplerDiskAt(x: Double, y: Double, r: Double, n: Int, vx: Double = initialVY, vy: Double = initialVX) {
         // создаём новый диск в точке клика
@@ -112,19 +120,21 @@ class NBodyPanel : JPanel() {
         bind("Z") { Config.theta = (Config.theta - 0.05).coerceAtLeast(0.2) }
         bind("X") { Config.theta = (Config.theta + 0.05).coerceAtMost(1.6) }
 
-        // Изменение количества тел для будущих создаваемых дисков/перезапуска
-        // ВНИМАНИЕ: предполагается, что Config.BODIES_COUNT — var
-        bind("A")  {
-            Config.BODIES_COUNT = (Config.BODIES_COUNT - 500).coerceAtLeast(50)
-            resetSingleCenterDisk(Config.BODIES_COUNT)
-        }
-        bind("S") {
-            Config.BODIES_COUNT = (Config.BODIES_COUNT + 500).coerceAtMost(20000)
-            resetSingleCenterDisk(Config.BODIES_COUNT)
-        }
+        bind("A") { Config.n = (Config.n - 100).coerceAtLeast(1000) }
+        bind("S") { Config.n = (Config.n + 100).coerceAtMost(10000) }
+
+        bind("Q") { Config.r = (Config.r - 10.0).coerceAtLeast(100.0) }
+        bind("W") { Config.r = (Config.r + 10.0).coerceAtMost(500.0) }
+
+        bind("O") { Config.DT = (Config.DT - 0.001).coerceAtLeast(-0.015) }
+        bind("P") { Config.DT = (Config.DT + 0.001).coerceAtMost(0.015) }
+
+        bind("K") { Config.G = (Config.G - 1.0).coerceAtLeast(0.0) }
+        bind("L") { Config.G = (Config.G + 1.0).coerceAtMost(100.0) }
 
         // Полный перезапуск текущей сцены (один диск по центру)
-        bind("R") { resetSingleCenterDisk(engine.getBodies().size) }
+        bind("R") {  engine.resetBodies(mutableListOf()) }
+        bind("ESCAPE") { exitProcess(0) }
     }
 
     private fun resetSingleCenterDisk(n: Int) {
@@ -150,22 +160,38 @@ class NBodyPanel : JPanel() {
         super.paintComponent(g)
         val g2 = g as Graphics2D
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
-        g2.color = Color.WHITE
+
+        // Точки тел
         for (b in engine.getBodies()) {
-            val ix = b.x.toInt()
-            val iy = b.y.toInt()
-            if (ix in 0 until width && iy in 0 until height) {
-                g2.drawLine(ix, iy, ix, iy) // 1 пиксель
-            }
+            g2.color = if (b.m >= Config.CENTRAL_MASS) Color.BLACK else Color.WHITE
+            val ix = b.x.toInt(); val iy = b.y.toInt()
+            if (ix in 0 until width && iy in 0 until height) g2.drawLine(ix, iy, ix, iy)
         }
-        g2.color = Color(255, 255, 255, 255)
-        g2.drawString(
-            "N=${engine.getBodies().size}  θ=%.2f  dt=%.3f  G=%.1f  [%s]".format(
-                Config.theta, Config.DT, Config.G, if (paused) "PAUSE" else "RUN"
-            ),
-            10, 20
-        )
-        g2.drawString("SPACE=pause | Z/X θ± | A/S N± | R=reset | ЛКМ — добавить диск", 10, 36)
+
+        // Линия от места нажатия до текущей позиции (drag preview)
+        if (dragStart != null && dragCurrent != null) {
+            val sx = dragStart!!.x; val sy = dragStart!!.y
+            val ex = dragCurrent!!.x; val ey = dragCurrent!!.y
+            val oldStroke = g2.stroke
+            g2.color = Color(0, 255, 0, 200)
+            g2.stroke = BasicStroke(
+                1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
+                10f, floatArrayOf(6f, 6f), 0f
+            )
+            g2.drawLine(sx, sy, ex, ey)
+            g2.stroke = oldStroke
+        }
+
+        // HUD
+        g2.color = Color(0, 255, 0)
+        g2.drawString("SPACE — pause | R — reset space | MOUSE1 — add kepler disk | ESCAPE — exit", 10, 40)
+        g2.drawString("Disk radius [Q/W] = ${Config.r}", 10, 60)
+        g2.drawString("Bodies count [A/S] = ${Config.n}", 10, 80)
+        g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
+        g2.drawString("Delta time [O/P] = ${Config.DT}", 10, 120)
+        g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
+        g2.drawString("Softening = ${Config.SOFTENING}", 10, 160)
+
         Toolkit.getDefaultToolkit().sync()
     }
 }

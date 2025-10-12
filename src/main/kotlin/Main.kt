@@ -2,7 +2,7 @@ import java.awt.Toolkit
 import javax.swing.*
 
 fun main() {
-    javax.swing.SwingUtilities.invokeLater {
+    SwingUtilities.invokeLater {
         UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
 
         val screen = Toolkit.getDefaultToolkit().screenSize
@@ -11,7 +11,7 @@ fun main() {
 
         val panel = NBodyPanel()
 
-        val frame = JFrame("Barnes–Hut N-Body • Kotlin + Coroutines")
+        val frame = JFrame("Barnes–Hut N-Body")
         frame.isUndecorated = true
         frame.defaultCloseOperation = JFrame.EXIT_ON_CLOSE
         frame.contentPane.add(panel)
