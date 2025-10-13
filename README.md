@@ -29,6 +29,7 @@ Visualization of gravitational dynamics using the Barnes–Hut algorithm impleme
 ### Mouse
 * **LMB + drag** — create a new Keplerian disk at the click position; the drag vector defines the additional velocity (`1 px = 1 unit/s`).
 * **Middle button** — clear the scene.
+* **ARROWS** — camera movement.
 
 ### Keyboard
 * `SPACE` — pause/resume.
@@ -39,6 +40,7 @@ Visualization of gravitational dynamics using the Barnes–Hut algorithm impleme
 * `Q / W` — change the radius of the created disk (100–500 px, step 10).
 * `O / P` — decrease/increase the integration step `Δt` (from −0.015 to 0.015).
 * `K / L` — decrease/increase the gravitational constant `G` (0–100).
+* `WHEEL DOWN/UP` — decrease/increase zoom (x1–x10).
 * `D` — toggle debug mode.
 
 ## HUD and Diagnostics

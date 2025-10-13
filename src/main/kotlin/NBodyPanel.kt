@@ -33,12 +33,6 @@ import kotlin.system.exitProcess
  */
 class NBodyPanel : JPanel() {
 
-    // --- панорамирование: непрерывное движение по удержанию стрелок ---
-    private var panLeft  = false
-    private var panRight = false
-    private var panUp    = false
-    private var panDown  = false
-
     /** Точка начала перетаскивания мышью (в экранных координатах). */
     private var dragStart: Point? = null
 
@@ -322,15 +316,16 @@ class NBodyPanel : JPanel() {
 
         // HUD
         g2.color = Color(0, 255, 0)
-        g2.drawString("SPACE — pause | R — reset space | MOUSE1 DRAG'N'DROP — add kepler disk | ESCAPE — exit", 10, 20)
+        g2.drawString("SPACE — pause | R — reset scene | MOUSE1 DRAG'N'DROP — add kepler disk | ARROWS — cam movement | ESCAPE — exit", 10, 20)
         g2.drawString("Disk radius [Q/W] = ${Config.R}", 10, 60)
         g2.drawString("Bodies count [A/S] = ${Config.N}", 10, 80)
         g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
         g2.drawString("Delta time [O/P] = ${Config.DT}", 10, 120)
         g2.drawString("Gravity [K/L] = ${Config.G}", 10, 140)
         g2.drawString("Debug mode [D] = $showTree", 10, 160)
-        g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 180)
-        g2.drawString("Softening = ${Config.SOFTENING}", 10, 200)
+        g2.drawString("Zoom [WHEEL] = $zoom", 10, 180)
+        g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 200)
+        g2.drawString("Softening = ${Config.SOFTENING}", 10, 220)
         Toolkit.getDefaultToolkit().sync()
     }
 }
