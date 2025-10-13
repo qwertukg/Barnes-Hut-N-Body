@@ -8,72 +8,108 @@ import java.awt.RenderingHints
 import java.awt.Toolkit
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelEvent
 import javax.swing.AbstractAction
 import javax.swing.JPanel
 import javax.swing.KeyStroke
 import javax.swing.Timer
 import kotlin.system.exitProcess
 
-/** Панель Swing, отвечающая за визуализацию и управление симуляцией Barnes–Hut. */
+/**
+ * Панель Swing, отвечающая за визуализацию и управление симуляцией Barnes–Hut.
+ *
+ * Возможности:
+ * - ЛКМ drag’n’drop: создать кеплеровский диск; длина и направление линии → начальная (vx, vy).
+ * - Средняя кнопка: очистить сцену.
+ * - Колесо мыши: зум (×1 … ×10) вокруг курсора.
+ * - Стрелки ← → ↑ ↓: панорамирование (смещение окна просмотра) в мировых координатах.
+ * - Клавиши: см. HUD/биндинги в setupKeys().
+ *
+ * Проекция «мир → экран»:
+ *      screenX = (worldX - viewX) * zoom
+ *      screenY = (worldY - viewY) * zoom
+ *      worldX  = viewX + screenX / zoom
+ *      worldY  = viewY + screenY / zoom
+ */
 class NBodyPanel : JPanel() {
 
-    /** Точка начала перетаскивания мышью. */
+    // --- панорамирование: непрерывное движение по удержанию стрелок ---
+    private var panLeft  = false
+    private var panRight = false
+    private var panUp    = false
+    private var panDown  = false
+
+    /** Точка начала перетаскивания мышью (в экранных координатах). */
     private var dragStart: Point? = null
 
-    /** Текущее положение курсора во время перетаскивания. */
+    /** Текущее положение курсора во время перетаскивания (в экранных координатах). */
     private var dragCurrent: Point? = null
 
-    /** Перевод пикселей перетаскивания в скорость. */
-    private val VEL_PER_PIXEL = 1   // 1 px перетаскивания = 0.05 ед. скорости (подбери под себя)
+    /** Перевод пикселей перетаскивания в скорость в мировых единицах (px/сек). */
+    private val VEL_PER_PIXEL = 1   // 1 px перетаскивания = 1 ед. скорости
 
-    /** Базовая скорость по X для кликовых дисков. */
+    /** Базовая скорость по X/Y для кликовых дисков. */
     private val initialVX = 0.0
-
-    /** Базовая скорость по Y для кликовых дисков. */
     private val initialVY = 0.0
 
     /** Показывать ли границы квадродерева. */
     private var showTree = false
+
+    // ---------- Viewport (проекция «мир → экран») ----------
+    /** Текущий масштаб (1.0 … 10.0). */
+    private var zoom = 1.0
+    private val zoomMin = 1.0
+    private val zoomMax = 10.0
+    private val zoomStep = 1.1 // множитель на один «щёлчок» колеса
+
+    /** Смещение окна просмотра (верх-левый угол) в мировых координатах. */
+    private var viewX = 0.0
+    private var viewY = 0.0
+
+    /** Шаг панорамирования в пикселях экрана на одно нажатие стрелки (переводится в мир через деление на zoom). */
+    private val panStepScreen = 10.0
+
+    /** Преобразование мир→экран. */
+    private fun worldToScreenX(wx: Double): Int = ((wx - viewX) * zoom).toInt()
+    private fun worldToScreenY(wy: Double): Int = ((wy - viewY) * zoom).toInt()
+
+    /** Преобразование экран→мир. */
+    private fun screenToWorldX(sx: Double): Double = viewX + sx / zoom
+    private fun screenToWorldY(sy: Double): Double = viewY + sy / zoom
 
     /**
      * Сформировать стартовый набор тел: два кеплеровских диска с противоположным дрейфом.
      * Следуем рекомендациям DAML по симметричной постановке задачи.
      */
     fun defaultBodies(): MutableList<Body> {
-        val s = 60.0  // s — модуль «дрейфовой» скорости диска (px/сек), задаёт движение всего диска целиком
+        val s = 60.0  // «дрейфовая» скорость диска (px/сек)
 
-        // Первый диск:
         val disc1 = BodyFactory.makeKeplerDisk(
-            nTotal = Config.N,                 // nTotal — сколько тел создать в этом диске (включая центральное)
-            vx = s,                        // vx — добавочный сдвиг скорости по X для всех тел диска (px/сек)
-            vy = 0.0,                      // vy — добавочный сдвиг скорости по Y для всех тел диска (px/сек)
-            x = Config.WIDTH_PX * 0.5,     // x — координата центра диска по X (в пикселях экрана)
-            y = Config.HEIGHT_PX * 0.30,    // y — координата центра диска по Y (в пикселях экрана)
-            r = Config.R,                     // r — радиус диска (макс. расстояние частиц от центра) в пикселях
-            clockwise = false              // clockwise — вращение по часовой
-        )
-
-        // Второй диск:
-        val disc2 = BodyFactory.makeKeplerDisk(
-            nTotal = Config.N,                 // число тел во втором диске
-            vx = -s,                       // двигать диск влево (противоположное направление первому)
-            vy = 0.0,                      // вертикального дрейфа нет
-            x = Config.WIDTH_PX * 0.5,     // центр по X тот же
-            y = Config.HEIGHT_PX * 0.70,    // центр по Y ниже, чтобы диски шли навстречу
-            r = Config.R,                      // радиус второго диска
+            nTotal = Config.N,
+            vx = s, vy = 0.0,
+            x = Config.WIDTH_PX * 0.5,
+            y = Config.HEIGHT_PX * 0.30,
+            r = Config.R,
             clockwise = false
         )
 
-        // Склеиваем оба списка тел в один
+        val disc2 = BodyFactory.makeKeplerDisk(
+            nTotal = Config.N,
+            vx = -s, vy = 0.0,
+            x = Config.WIDTH_PX * 0.5,
+            y = Config.HEIGHT_PX * 0.70,
+            r = Config.R,
+            clockwise = false
+        )
+
         return (disc1 + disc2).toMutableList()
     }
-
 
     /** Движок симуляции для текущего множества тел. */
     private var engine = PhysicsEngine(defaultBodies())
 
     /** Периодический таймер перерисовки и шагов симуляции. */
-    private val timer = Timer(1) { tick() } // ~60 FPS (1ms таймер — частая перерисовка)
+    private val timer = Timer(1) { tick() } // ~60 FPS
 
     /** Флаг постановки симуляции на паузу. */
     private var paused = false
@@ -87,7 +123,17 @@ class NBodyPanel : JPanel() {
         timer.start()
     }
 
-    /** Настроить обработку мыши для добавления новых дисков. */
+    /** Ограничить камеру так, чтобы видимая область полностью находилась в пределах базового мира. */
+    private fun clampView() {
+        val visibleW = width.toDouble() / zoom
+        val visibleH = height.toDouble() / zoom
+        val maxX = (Config.WIDTH_PX - visibleW).coerceAtLeast(0.0)
+        val maxY = (Config.HEIGHT_PX - visibleH).coerceAtLeast(0.0)
+        viewX = viewX.coerceIn(0.0, maxX)
+        viewY = viewY.coerceIn(0.0, maxY)
+    }
+
+    /** Настроить обработку мыши (клик/drag и колесо для зума). */
     private fun setupMouse() {
         val mouse = object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
@@ -109,55 +155,72 @@ class NBodyPanel : JPanel() {
             }
             override fun mouseReleased(e: MouseEvent) {
                 if (e.button == MouseEvent.BUTTON1 && dragStart != null) {
-                    val start = dragStart!! // сохранённая точка начала перетаскивания
-                    val end = e.point ?: start // конечная точка (или начало, если недоступно)
-                    val dx = (end.x - start.x).toDouble() // смещение по X
-                    val dy = (end.y - start.y).toDouble() // смещение по Y
-                    val vx = dx * VEL_PER_PIXEL // результирующая скорость по X
-                    val vy = dy * VEL_PER_PIXEL // результирующая скорость по Y
+                    val start = dragStart!!
+                    val end = e.point ?: start
+                    val dxScreen = (end.x - start.x).toDouble()
+                    val dyScreen = (end.y - start.y).toDouble()
 
-                    addKeplerDiskAt(start.x.toDouble(), start.y.toDouble(), Config.R, Config.N, vx, vy)
+                    // Скорости в мире → делим на zoom
+                    val vx = (dxScreen / zoom) * VEL_PER_PIXEL
+                    val vy = (dyScreen / zoom) * VEL_PER_PIXEL
+
+                    // Центр диска — мировые координаты
+                    val wx = screenToWorldX(start.x.toDouble())
+                    val wy = screenToWorldY(start.y.toDouble())
+
+                    addKeplerDiskAt(wx, wy, Config.R, Config.N, vx, vy)
 
                     dragStart = null
                     dragCurrent = null
                     repaint()
                 }
             }
+
+            override fun mouseWheelMoved(e: MouseWheelEvent) {
+                val sx = e.x.toDouble()
+                val sy = e.y.toDouble()
+
+                val wx = screenToWorldX(sx)
+                val wy = screenToWorldY(sy)
+
+                val factor = if (e.preciseWheelRotation < 0) zoomStep else 1.0 / zoomStep
+                val newZoom = (zoom * factor).coerceIn(zoomMin, zoomMax)
+
+                if (newZoom != zoom) {
+                    viewX = wx - sx / newZoom
+                    viewY = wy - sy / newZoom
+                    zoom = newZoom
+                    clampView()
+                }
+            }
         }
         addMouseListener(mouse)
-        addMouseMotionListener(mouse) // ← важно: иначе mouseDragged не придёт
+        addMouseMotionListener(mouse) // для drag
+        addMouseWheelListener(mouse)  // колесо — зум
     }
-
 
     /**
      * Добавить новый кеплеровский диск по указанным параметрам.
-     * @param x координата центра по X.
-     * @param y координата центра по Y.
-     * @param r радиус диска.
+     * @param x координата центра по X (мир).
+     * @param y координата центра по Y (мир).
+     * @param r радиус диска (мир).
      * @param n число тел.
-     * @param vx добавочная скорость по X.
-     * @param vy добавочная скорость по Y.
+     * @param vx добавочная скорость по X (мир).
+     * @param vy добавочная скорость по Y (мир).
      */
     private fun addKeplerDiskAt(x: Double, y: Double, r: Double, n: Int, vx: Double = initialVY, vy: Double = initialVX) {
-        // создаём новый диск в точке клика
         val newDisk = BodyFactory.makeKeplerDisk(
-            nTotal = n,
-            vx = vx,
-            vy = vy,
-            x = x,
-            y = y,
-            r = r
+            nTotal = n, vx = vx, vy = vy, x = x, y = y, r = r
         )
-        // объединяем с текущими телами
         val merged = (engine.getBodies() + newDisk).toMutableList()
         engine.resetBodies(merged)
     }
 
-    /** Настроить горячие клавиши для управления симуляцией. */
+    /** Настроить горячие клавиши для управления симуляцией (включая панорамирование стрелками). */
     private fun setupKeys() {
         fun bind(key: String, action: () -> Unit) {
-            val im = getInputMap(WHEN_IN_FOCUSED_WINDOW) // карта привязок клавиш
-            val am = actionMap // карта действий панели
+            val im = getInputMap(WHEN_IN_FOCUSED_WINDOW)
+            val am = actionMap
             im.put(KeyStroke.getKeyStroke(key), key)
             am.put(key, object : AbstractAction() {
                 override fun actionPerformed(e: java.awt.event.ActionEvent?) = action()
@@ -179,12 +242,25 @@ class NBodyPanel : JPanel() {
         bind("K") { Config.G = (Config.G - 1.0).coerceAtLeast(0.0) }
         bind("L") { Config.G = (Config.G + 1.0).coerceAtMost(100.0) }
 
-        // Полный перезапуск текущей сцены (один диск по центру)
-        bind("R") {  engine.resetBodies(defaultBodies()) }
+        bind("R") { engine.resetBodies(defaultBodies()) }
         bind("ESCAPE") { exitProcess(0) }
 
-        // показать/скрыть границы квадродерева
+        // Показать/скрыть границы квадродерева
         bind("D") { showTree = !showTree; repaint() }
+
+        // -------- Панорамирование стрелками (смещение окна просмотра) --------
+        // Шаг в мире соответствует фиксированному пиксельному шагу на экране
+        fun pan(dxScreen: Double, dyScreen: Double) {
+            val dxWorld = dxScreen / zoom
+            val dyWorld = dyScreen / zoom
+            viewX += dxWorld
+            viewY += dyWorld
+            clampView()
+        }
+        bind("LEFT")  { pan(-panStepScreen, 0.0) }
+        bind("RIGHT") { pan(+panStepScreen, 0.0) }
+        bind("UP")    { pan(0.0, -panStepScreen) }
+        bind("DOWN")  { pan(0.0, +panStepScreen) }
     }
 
     /** Один кадр визуализации и, при необходимости, шаг симуляции. */
@@ -193,20 +269,21 @@ class NBodyPanel : JPanel() {
         repaint()
     }
 
-    /** Отрисовать все тела и служебные элементы HUD. */
+    /** Отрисовать все тела, превью драга, границы квадродерева и HUD. */
     override fun paintComponent(g: Graphics) {
         super.paintComponent(g)
         val g2 = g as Graphics2D
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
 
-        // Точки тел
+        // Точки тел (мир → экран)
         for (b in engine.getBodies()) {
             g2.color = if (b.m >= Config.CENTRAL_MASS) Color.BLACK else Color.WHITE
-            val ix = b.x.toInt(); val iy = b.y.toInt()
-            if (ix in 0 until width && iy in 0 until height) g2.drawLine(ix, iy, ix, iy)
+            val sx = worldToScreenX(b.x)
+            val sy = worldToScreenY(b.y)
+            if (sx in 0 until width && sy in 0 until height) g2.drawLine(sx, sy, sx, sy)
         }
 
-        // Линия от места нажатия до текущей позиции (drag preview)
+        // Линия drag preview (экранные координаты)
         if (dragStart != null && dragCurrent != null) {
             val sx = dragStart!!.x; val sy = dragStart!!.y
             val ex = dragCurrent!!.x; val ey = dragCurrent!!.y
@@ -217,26 +294,26 @@ class NBodyPanel : JPanel() {
                 10f, floatArrayOf(6f, 6f), 0f
             )
             g2.drawLine(sx, sy, ex, ey)
-            val w = (Config.R * 2).toInt()
-            g2.drawArc(sx - Config.R.toInt(), sy - Config.R.toInt(), w, w, 0, 360)
+            // Превью радиуса диска — r (мир) → r*zoom (экран)
+            val rScreen = (Config.R * zoom).toInt()
+            g2.drawArc(sx - rScreen, sy - rScreen, rScreen * 2, rScreen * 2, 0, 360)
             g2.stroke = oldStroke
         }
 
-        // границы квадродерева
+        // Границы квадродерева (мир → экран)
         if (showTree) {
             val oldColor = g2.color
             val oldStroke = g2.stroke
             g2.color = Color(0, 255, 0, 180)
             g2.stroke = BasicStroke(1f)
 
-            // Получаем последнее дерево (если пауза/старт — построим разок)
             val tree = engine.getTreeForDebug()
             tree.visitQuads { q ->
-                val x = (q.cx - q.h).toInt()
-                val y = (q.cy - q.h).toInt()
-                val s = (q.h * 2).toInt()
-                g2.drawLine(x, y, x, y+s)
-                g2.drawLine(x, y, x+s, y)
+                val x = worldToScreenX(q.cx - q.h)
+                val y = worldToScreenY(q.cy - q.h)
+                val s = (q.h * 2.0 * zoom).toInt()
+                g2.drawLine(x, y, x, y + s)
+                g2.drawLine(x, y, x + s, y)
             }
 
             g2.color = oldColor
@@ -254,7 +331,6 @@ class NBodyPanel : JPanel() {
         g2.drawString("Debug mode [D] = $showTree", 10, 160)
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 180)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 200)
-
         Toolkit.getDefaultToolkit().sync()
     }
 }
