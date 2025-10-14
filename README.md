@@ -1,5 +1,7 @@
 # Barnes–Hut N-Body
 
+![collide](collide.gif)
+
 Visualization of gravitational dynamics using the Barnes–Hut algorithm implemented in Kotlin/Swing. The application launches in a fullscreen borderless mode, automatically adapts to the current display resolution, and demonstrates the collision of two Keplerian disks composed of a central massive star and a ring of satellites with correctly computed enclosed mass.
 
 ## Quick Start
