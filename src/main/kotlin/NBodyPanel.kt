@@ -13,6 +13,7 @@ import javax.swing.AbstractAction
 import javax.swing.JPanel
 import javax.swing.KeyStroke
 import javax.swing.Timer
+import kotlin.random.Random
 import kotlin.system.exitProcess
 
 /**
@@ -76,26 +77,20 @@ class NBodyPanel : JPanel() {
      * Следуем рекомендациям DAML по симметричной постановке задачи.
      */
     fun defaultBodies(): MutableList<Body> {
-        val s = 60.0  // «дрейфовая» скорость диска (px/сек)
-
-        val disc1 = BodyFactory.makeKeplerDisk(
-            nTotal = Config.N,
-            vx = s, vy = 0.0,
-            x = Config.WIDTH_PX * 0.5,
-            y = Config.HEIGHT_PX * 0.30,
-            r = Config.R,
-            clockwise = false
+        val disc1 = BodyFactory.makeGalaxyDisk(
+            5_000,
+            r = 200.0,
+            centralMass = 50_000.0,
+            totalSatelliteMass = 5_000.0
         )
-
-        val disc2 = BodyFactory.makeKeplerDisk(
-            nTotal = Config.N,
-            vx = -s, vy = 0.0,
-            x = Config.WIDTH_PX * 0.5,
-            y = Config.HEIGHT_PX * 0.70,
-            r = Config.R,
-            clockwise = false
+        val disc2 = BodyFactory.makeGalaxyDisk(
+            2500,
+            y = Config.HEIGHT_PX * 0.3,
+            vx = -100.0,
+            r = 100.0,
+            centralMass = 5_000.0,
+            totalSatelliteMass = 500.0
         )
-
         return (disc1 + disc2).toMutableList()
     }
 
@@ -162,7 +157,8 @@ class NBodyPanel : JPanel() {
                     val wx = screenToWorldX(start.x.toDouble())
                     val wy = screenToWorldY(start.y.toDouble())
 
-                    addKeplerDiskAt(wx, wy, Config.R, Config.N, vx, vy)
+//                    addKeplerDiskAt(wx, wy, Config.R, Config.N, vx, vy)
+                    addGalaxyDiskAt(wx, wy, Config.R, Config.N, vx, vy)
 
                     dragStart = null
                     dragCurrent = null
@@ -204,6 +200,14 @@ class NBodyPanel : JPanel() {
      */
     private fun addKeplerDiskAt(x: Double, y: Double, r: Double, n: Int, vx: Double = initialVY, vy: Double = initialVX) {
         val newDisk = BodyFactory.makeKeplerDisk(
+            nTotal = n, vx = vx, vy = vy, x = x, y = y, r = r
+        )
+        val merged = (engine.getBodies() + newDisk).toMutableList()
+        engine.resetBodies(merged)
+    }
+
+    private fun addGalaxyDiskAt(x: Double, y: Double, r: Double, n: Int, vx: Double = initialVY, vy: Double = initialVX) {
+        val newDisk = BodyFactory.makeGalaxyDisk(
             nTotal = n, vx = vx, vy = vy, x = x, y = y, r = r
         )
         val merged = (engine.getBodies() + newDisk).toMutableList()
@@ -271,7 +275,7 @@ class NBodyPanel : JPanel() {
 
         // Точки тел (мир → экран)
         for (b in engine.getBodies()) {
-            g2.color = if (b.m >= Config.CENTRAL_MASS) Color.BLACK else Color.WHITE
+            g2.color = if (b.m >= 1000) Color.BLACK else Color.WHITE
             val sx = worldToScreenX(b.x)
             val sy = worldToScreenY(b.y)
             if (sx in 0 until width && sy in 0 until height) g2.drawLine(sx, sy, sx, sy)

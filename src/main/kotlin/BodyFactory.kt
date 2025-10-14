@@ -59,4 +59,94 @@ object BodyFactory {
         }
         return bodies
     }
+
+    fun makeGalaxyDisk(
+        nTotal: Int,
+        // --- ключ к самозакрутке ---
+        epsM2: Double = 0.03,              // амплитуда крошечного m=2-возмущения (2–4% достаточно)
+        phi0: Double = 0.0,                // фаза «бара» (смещение по углу)
+        barTaperR: Double? = null,         // радиус затухания возмущения; по умолчанию берем rMax*0.6
+        // профиль/«холодность» диска
+        radialScale: Double? = null,       // масштаб экспоненты Rd; по умолчанию rMax/3
+        speedJitter: Double = 0.01,        // маленький шум скоростей, чтобы диск был «холодным»
+        radialJitter: Double = 0.0,        // лучше 0 — радиальных скоростей почти нет
+        clockwise: Boolean = true,
+        rng: Random = Random(Random.nextLong()),
+        vx: Double = 0.0, vy: Double = 0.0,
+        x: Double = Config.WIDTH_PX * 0.5,
+        y: Double = Config.HEIGHT_PX * 0.5,
+        r: Double = 200.0,
+        minR: Double = Config.MIN_R,
+        centralMass: Double = Config.CENTRAL_MASS,
+        totalSatelliteMass: Double = Config.TOTAL_SATELLITE_MASS
+    ): MutableList<Body> {
+        val cx = x
+        val cy = y
+        val rMax = r
+        val sats = (nTotal - 1).coerceAtLeast(0)
+        val bodies = ArrayList<Body>(sats + 1)
+
+        // центр (для самозакрутки обычно полезно уменьшить CENTRAL_MASS и поднять массу диска в Config)
+        bodies += Body(cx, cy, vx, vy, centralMass)
+
+        val mSat = if (sats > 0) totalSatelliteMass / sats else 0.0
+        val Rd = radialScale ?: (rMax / 3.0)
+        val taperR = barTaperR ?: (rMax * 0.6)
+
+        // выбор R по экспоненциальному профилю на [minR, rMax]
+        fun sampleExpRadius(): Double {
+            val u = rng.nextDouble()
+            val A = exp(-(rMax - minR) / Rd)
+            val t = 1 - u * (1 - A)
+            return minR - Rd * ln(t)
+        }
+
+        // расстановка звёзд: почти осесимметрично + микроскопическое m=2 возмущение по радиусу
+        repeat(sats) {
+            val R = sampleExpRadius()
+            val theta = rng.nextDouble() * 2.0 * Math.PI
+
+            // m=2 «яйцеобразность» (бар): r' = r*(1 + eps*cos(2*(θ-φ0))*taper(R))
+            val taper = exp(- (R / taperR) * (R / taperR)) // мягкое затухание возмущения к периферии
+            val R2 = R * (1.0 + epsM2 * cos(2.0 * (theta - phi0)) * taper)
+
+            val px = cx + R2 * cos(theta)
+            val py = cy + R2 * sin(theta)
+            bodies += Body(px, py, 0.0, 0.0, mSat)
+        }
+
+        // точный M_enclosed по фактическим позициям (как у тебя)
+        data class RIdx(val i: Int, val r: Double)
+        val sorted = bodies.mapIndexed { i, b -> RIdx(i, hypot(b.x - cx, b.y - cy)) }.sortedBy { it.r }
+        var acc = 0.0
+        val Menc = DoubleArray(bodies.size)
+        for (ri in sorted) { acc += bodies[ri.i].m; Menc[ri.i] = acc }
+
+        // круговые скорости + минимальный шум; радиальных скоростей почти нет (холодный диск)
+        for (i in 1 until bodies.size) {
+            val b = bodies[i]
+            val dx = b.x - cx; val dy = b.y - cy
+            val R = max(1e-6, hypot(dx, dy))
+            val vCirc = sqrt(Config.G * Menc[i] / R)
+            val v = vCirc * (1.0 + (rng.nextDouble() - 0.5) * 2.0 * speedJitter)
+
+            // чисто тангенциальная компонента (холодно); при желании можно добавить крошечный vr ~ radialJitter*vCirc
+            val (tx, ty) = if (clockwise) (dy / R) to (-dx / R) else (-dy / R) to (dx / R)
+            var vx0 = tx * v
+            var vy0 = ty * v
+
+            if (radialJitter > 0.0) {
+                // очень небольшая радиальная скорость вдоль (dx,dy)
+                val vr = (rng.nextDouble() - 0.5) * 2.0 * radialJitter * vCirc
+                vx0 += (dx / R) * vr
+                vy0 += (dy / R) * vr
+            }
+
+            b.vx = vx0 + vx
+            b.vy = vy0 + vy
+        }
+
+        return bodies
+    }
+
 }

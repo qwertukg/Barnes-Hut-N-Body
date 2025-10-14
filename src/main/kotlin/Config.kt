@@ -10,7 +10,7 @@ object Config {
     var G = 80.0
 
     /** Шаг интегрирования по времени. */
-    var DT = 0.015
+    var DT = 0.005
 
     /** Значение сглаживания силы на малых расстояниях. */
     var SOFTENING = 1.0
@@ -19,7 +19,7 @@ object Config {
     val SOFT2 = SOFTENING * SOFTENING
 
     /** Параметр тэта для критерия Барнса–Хатта. */
-    var theta: Double = 0.40  // Barnes–Hut θ
+    var theta: Double = 0.30  // Barnes–Hut θ
 
     /** Радиус создаваемого диска при клике. */
     var R = 150.0
@@ -28,12 +28,12 @@ object Config {
     var N = 2000
 
     /** Масса центрального тела кеплеровского диска. */
-    const val CENTRAL_MASS = 50_000.0
+    const val CENTRAL_MASS = 100_000.0
 
     /** Минимально допустимый радиус спутника от центра. */
-    const val MIN_R = 24.0
+    const val MIN_R = 8.0
 
     /** Суммарная масса спутников кеплеровского диска. */
-    const val TOTAL_SATELLITE_MASS = 1000.0
+    const val TOTAL_SATELLITE_MASS = 10_000.0
 
 }
