@@ -210,6 +210,21 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
     /** Последнее построенное дерево (для отрисовки/отладки). */
     private var lastTree: BHTree? = null
 
+    /**
+     * Порог массы «прожорливого» тела. Только тела с массой > mergeMaxMass
+     * поглощают соседей на дистанции < mergeMinDist.
+     *
+     * Значение задайте снаружи перед шагами симуляции.
+     */
+    var mergeMaxMass: Double = 4_000.0
+
+    /**
+     * Порог дистанции для слияния (евклидово расстояние).
+     *
+     * Значение задайте снаружи перед шагами симуляции.
+     */
+    var mergeMinDist: Double = Config.MIN_R
+
     fun getTreeForDebug(): BHTree {
         val t = lastTree
         return t ?: buildTree().also { lastTree = it }
@@ -309,18 +324,14 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
      *    первые bodies.size элементов.
      */
     private fun mergeCloseBodiesIfNeeded() {
-        val maxM = mergeMaxMass
-        val minD = mergeMinDist
-        if (minD <= 0.0) return
-        val bs = bodies
-        if (bs.size <= 1) return
+        if (mergeMinDist <= 0.0 || bodies.size <= 1) return
 
-        val minD2 = minD * minD
+        val minD2 = mergeMinDist * mergeMinDist
         var i = 0
-        while (i < bs.size) {
-            val bi = bs[i]
-            if (bi.m > maxM) {
-                val n = bs.size
+        while (i < bodies.size) {
+            val bi = bodies[i]
+            if (bi.m > mergeMaxMass) {
+                val n = bodies.size
                 val startJ = i + 1
                 if (startJ < n) {
                     val span = n - startJ
@@ -332,35 +343,32 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
                         var s = startJ
                         while (s < n) {
                             val e = min(n, s + step)
-                            val s0 = s           // ← фиксируем границы чанка
-                            val e0 = e
+                            val s0 = s; val e0 = e // фиксируем границы чанка
                             jobs += async(Dispatchers.Default) {
                                 val local = ArrayList<Int>((e0 - s0).coerceAtLeast(0))
                                 var j = s0
                                 while (j < e0) {
-                                    val bj = bs[j]
+                                    val bj = bodies[j]
                                     val dx = bj.x - bi.x
                                     val dy = bj.y - bi.y
-                                    if (dx * dx + dy * dy < minD2) {
-                                        local.add(j)
-                                    }
+                                    if (dx * dx + dy * dy < minD2) local.add(j)
                                     j++
                                 }
                                 local
                             }
                             s = e
                         }
-                        val out = ArrayList<Int>()
-                        for (d in jobs) out.addAll(d.await())
-                        out
+                        buildList {
+                            for (d in jobs) addAll(d.await())
+                        }
                     }
 
                     if (victims.isNotEmpty()) {
-                        victims.sortedDescending().forEach { j ->
-                            if (j <= i || j >= bs.size) return@forEach
-                            val bj = bs[j]
+                        for (j in victims.sortedDescending()) {
+                            if (j <= i || j >= bodies.size) continue
+                            val bj = bodies[j]
                             bi.m += bj.m
-                            bs.removeAt(j)
+                            bodies.removeAt(j)
                         }
                         lastTree = null
                     }
@@ -369,19 +377,4 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
             i++
         }
     }
-
-    /**
-     * Порог массы «прожорливого» тела. Только тела с массой > mergeMaxMass
-     * поглощают соседей на дистанции < mergeMinDist.
-     *
-     * Значение задайте снаружи перед шагами симуляции.
-     */
-    var mergeMaxMass: Double = 4_000.0
-
-    /**
-     * Порог дистанции для слияния (евклидово расстояние).
-     *
-     * Значение задайте снаружи перед шагами симуляции.
-     */
-    var mergeMinDist: Double = Config.MIN_R
 }

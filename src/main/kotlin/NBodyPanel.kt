@@ -275,7 +275,7 @@ class NBodyPanel : JPanel() {
 
         // Точки тел (мир → экран)
         for (b in engine.getBodies()) {
-            g2.color = if (b.m >= 1000) Color.RED else Color.WHITE
+            g2.color = if (b.m >= 1000) Color.BLACK else Color.WHITE
             val sx = worldToScreenX(b.x)
             val sy = worldToScreenY(b.y)
             if (sx in 0 until width && sy in 0 until height) g2.drawLine(sx, sy, sx, sy)
