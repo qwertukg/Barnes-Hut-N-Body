@@ -86,7 +86,7 @@ class NBodyPanel : JPanel() {
         val disc2 = BodyFactory.makeGalaxyDisk(
             2500,
             y = Config.HEIGHT_PX * 0.3,
-            vx = -100.0,
+            vx = -25.0,
             r = 100.0,
             centralMass = 5_000.0,
             totalSatelliteMass = 500.0
@@ -275,7 +275,7 @@ class NBodyPanel : JPanel() {
 
         // Точки тел (мир → экран)
         for (b in engine.getBodies()) {
-            g2.color = if (b.m >= 1000) Color.BLACK else Color.WHITE
+            g2.color = if (b.m >= 1000) Color.RED else Color.WHITE
             val sx = worldToScreenX(b.x)
             val sy = worldToScreenY(b.y)
             if (sx in 0 until width && sy in 0 until height) g2.drawLine(sx, sy, sx, sy)

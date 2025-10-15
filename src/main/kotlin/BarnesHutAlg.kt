@@ -262,6 +262,9 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
 
     /** Один шаг Leapfrog (kick–drift–kick). */
     fun step() {
+        // слияние тел после шага
+        mergeCloseBodiesIfNeeded()
+
         var root = buildTree() // строим дерево для текущего положения
         runBlocking { computeAccelerations(root) } // вычисляем ускорения на текущий момент
 
@@ -287,5 +290,68 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
 
         // сохранить дерево для рендера
         lastTree = root
+
+
     }
+
+    /**
+     * Слить близкие тела с «прожорливыми» массивными телами.
+     *
+     * Правило:
+     *  - Если у тела i масса > mergeMaxMass и оно находится ближе mergeMinDist к телу j,
+     *    то масса i увеличивается на массу j, а тело j удаляется.
+     *  - Если массы равны (i.m == j.m), удаляется второе тело (j).
+     *
+     * Замечания:
+     *  - Проверяется евклидово расстояние.
+     *  - Удаления производятся на лету; индексы аккуратно поддерживаются.
+     *  - Буферы ax/ay не пересоздаём — на следующем шаге будут использоваться только
+     *    первые bodies.size элементов.
+     */
+    private fun mergeCloseBodiesIfNeeded() {
+        val maxM = mergeMaxMass
+        val minD = mergeMinDist
+        if (minD <= 0.0) return
+        if (bodies.size <= 1) return
+
+        val minD2 = minD * minD
+        var i = 0
+        while (i < bodies.size) {
+            val bi = bodies[i]
+            if (bi.m > maxM) {
+                var j = i + 1
+                while (j < bodies.size) {
+                    val bj = bodies[j]
+                    val dx = bj.x - bi.x
+                    val dy = bj.y - bi.y
+                    if (dx*dx + dy*dy < minD2) {
+                        // столкновение по правилу
+                        bi.m += bj.m
+                        bodies.removeAt(j)
+                        continue
+                    }
+                    j++
+                }
+            }
+            i++
+        }
+
+        // так как состав тел изменился — сбросим кэш дерева
+        lastTree = null
+    }
+
+    /**
+     * Порог массы «прожорливого» тела. Только тела с массой > mergeMaxMass
+     * поглощают соседей на дистанции < mergeMinDist.
+     *
+     * Значение задайте снаружи перед шагами симуляции.
+     */
+    var mergeMaxMass: Double = 4_000.0
+
+    /**
+     * Порог дистанции для слияния (евклидово расстояние).
+     *
+     * Значение задайте снаружи перед шагами симуляции.
+     */
+    var mergeMinDist: Double = Config.MIN_R
 }
