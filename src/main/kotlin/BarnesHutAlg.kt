@@ -1,4 +1,6 @@
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -310,32 +312,62 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
         val maxM = mergeMaxMass
         val minD = mergeMinDist
         if (minD <= 0.0) return
-        if (bodies.size <= 1) return
+        val bs = bodies
+        if (bs.size <= 1) return
 
         val minD2 = minD * minD
         var i = 0
-        while (i < bodies.size) {
-            val bi = bodies[i]
+        while (i < bs.size) {
+            val bi = bs[i]
             if (bi.m > maxM) {
-                var j = i + 1
-                while (j < bodies.size) {
-                    val bj = bodies[j]
-                    val dx = bj.x - bi.x
-                    val dy = bj.y - bi.y
-                    if (dx*dx + dy*dy < minD2) {
-                        // столкновение по правилу
-                        bi.m += bj.m
-                        bodies.removeAt(j)
-                        continue
+                val n = bs.size
+                val startJ = i + 1
+                if (startJ < n) {
+                    val span = n - startJ
+                    val workers = min(cores, max(1, span / 2048))
+                    val step = max(1, (span + workers - 1) / workers)
+
+                    val victims: List<Int> = runBlocking {
+                        val jobs = ArrayList<Deferred<MutableList<Int>>>(workers)
+                        var s = startJ
+                        while (s < n) {
+                            val e = min(n, s + step)
+                            val s0 = s           // ← фиксируем границы чанка
+                            val e0 = e
+                            jobs += async(Dispatchers.Default) {
+                                val local = ArrayList<Int>((e0 - s0).coerceAtLeast(0))
+                                var j = s0
+                                while (j < e0) {
+                                    val bj = bs[j]
+                                    val dx = bj.x - bi.x
+                                    val dy = bj.y - bi.y
+                                    if (dx * dx + dy * dy < minD2) {
+                                        local.add(j)
+                                    }
+                                    j++
+                                }
+                                local
+                            }
+                            s = e
+                        }
+                        val out = ArrayList<Int>()
+                        for (d in jobs) out.addAll(d.await())
+                        out
                     }
-                    j++
+
+                    if (victims.isNotEmpty()) {
+                        victims.sortedDescending().forEach { j ->
+                            if (j <= i || j >= bs.size) return@forEach
+                            val bj = bs[j]
+                            bi.m += bj.m
+                            bs.removeAt(j)
+                        }
+                        lastTree = null
+                    }
                 }
             }
             i++
         }
-
-        // так как состав тел изменился — сбросим кэш дерева
-        lastTree = null
     }
 
     /**
