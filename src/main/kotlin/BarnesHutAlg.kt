@@ -262,9 +262,6 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
 
     /** Один шаг Leapfrog (kick–drift–kick). */
     fun step() {
-        // слияние тел после шага
-        mergeCloseBodiesIfNeeded()
-
         var root = buildTree() // строим дерево для текущего положения
         runBlocking { computeAccelerations(root) } // вычисляем ускорения на текущий момент
 
@@ -291,7 +288,8 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
         // сохранить дерево для рендера
         lastTree = root
 
-
+        // слияние тел после шага
+        mergeCloseBodiesIfNeeded()
     }
 
     /**
