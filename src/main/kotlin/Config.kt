@@ -1,5 +1,6 @@
 /** Глобальная конфигурация симуляции и визуализации Barnes–Hut. */
 object Config {
+    val FULL_SCREEN_MODE = true
     /** Ширина окна визуализации в пикселях. */
     var WIDTH_PX = 2400
 
