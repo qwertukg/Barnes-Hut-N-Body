@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.BarnesHut" parent="Theme.Material3.Dark.NoActionBar" />
+</resources>
