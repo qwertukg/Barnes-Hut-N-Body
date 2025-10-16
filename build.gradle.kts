@@ -1,28 +1,13 @@
 plugins {
-    kotlin("jvm") version "2.2.20"
-    application
+    kotlin("multiplatform") version "1.9.22" apply false
+    kotlin("android") version "1.9.22" apply false
+    id("com.android.application") version "8.2.2" apply false
+    id("com.android.library") version "8.2.2" apply false
 }
 
-group = "kz.qwertukg"
-version = "1.0-SNAPSHOT"
-
-repositories {
-    mavenCentral()
-}
-
-dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-    testImplementation(kotlin("test"))
-}
-
-kotlin {
-    jvmToolchain(18)
-}
-
-application {
-    mainClass.set("MainKt")
-}
-
-tasks.test {
-    useJUnitPlatform()
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
 }
