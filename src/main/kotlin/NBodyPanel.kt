@@ -72,6 +72,10 @@ class NBodyPanel : JPanel() {
     private fun screenToWorldX(sx: Double): Double = viewX + sx / zoom
     private fun screenToWorldY(sy: Double): Double = viewY + sy / zoom
 
+    private var fps = 0
+    private var frames = 0
+    private var lastSec = System.currentTimeMillis()
+
     /**
      * Сформировать стартовый набор тел: два кеплеровских диска с противоположным дрейфом.
      * Следуем рекомендациям DAML по симметричной постановке задачи.
@@ -338,6 +342,16 @@ class NBodyPanel : JPanel() {
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 200)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 220)
         g2.drawString("Create bodies cloud [C]", 10, 240)
+
+        frames++
+        val now = System.currentTimeMillis()
+        if (now - lastSec >= 1000) {
+            fps = frames
+            frames = 0
+            lastSec = now
+        }
+        g2.drawString("FPS: $fps", 10, 260) // координаты подгони по вкусу
+
         Toolkit.getDefaultToolkit().sync()
     }
 }
