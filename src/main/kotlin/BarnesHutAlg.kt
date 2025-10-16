@@ -332,44 +332,47 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
             val bi = bodies[i]
             if (bi.m > mergeMaxMass) {
                 val n = bodies.size
-                val startJ = i + 1
-                if (startJ < n) {
-                    val span = n - startJ
-                    val workers = min(cores, max(1, span / 2048))
-                    val step = max(1, (span + workers - 1) / workers)
+                if (n > 1) {
+                    // --- параллельный поиск жертв по всему диапазону [0, n), кроме j==i ---
+                    val workers = min(cores, max(1, n / 4096))
+                    val step = max(1, (n + workers - 1) / workers)
 
                     val victims: List<Int> = runBlocking {
                         val jobs = ArrayList<Deferred<MutableList<Int>>>(workers)
-                        var s = startJ
+                        var s = 0
                         while (s < n) {
                             val e = min(n, s + step)
-                            val s0 = s; val e0 = e // фиксируем границы чанка
+                            val s0 = s; val e0 = e
                             jobs += async(Dispatchers.Default) {
                                 val local = ArrayList<Int>((e0 - s0).coerceAtLeast(0))
                                 var j = s0
                                 while (j < e0) {
-                                    val bj = bodies[j]
-                                    val dx = bj.x - bi.x
-                                    val dy = bj.y - bi.y
-                                    if (dx * dx + dy * dy < minD2) local.add(j)
+                                    if (j != i) {
+                                        val bj = bodies[j]
+                                        val dx = bj.x - bi.x
+                                        val dy = bj.y - bi.y
+                                        if (dx * dx + dy * dy < minD2) local.add(j)
+                                    }
                                     j++
                                 }
                                 local
                             }
                             s = e
                         }
-                        buildList {
-                            for (d in jobs) addAll(d.await())
-                        }
+                        buildList { for (d in jobs) addAll(d.await()) }
                     }
 
                     if (victims.isNotEmpty()) {
                         for (j in victims.sortedDescending()) {
-                            if (j <= i || j >= bodies.size) continue
+                            if (j < 0 || j >= bodies.size) continue
+                            if (bodies[j] === bi) continue
                             val bj = bodies[j]
                             bi.m += bj.m
                             bodies.removeAt(j)
                         }
+                        // bi мог сдвинуться из-за удалений j < i — выровняем i под текущий индекс bi
+                        val newIndex = bodies.indexOf(bi)
+                        i = if (newIndex >= 0) newIndex else (i - 1).coerceAtLeast(0)
                         lastTree = null
                     }
                 }
