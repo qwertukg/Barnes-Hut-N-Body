@@ -78,15 +78,15 @@ class NBodyPanel : JPanel() {
      */
     fun defaultBodies(): MutableList<Body> {
         val disc1 = BodyFactory.makeGalaxyDisk(
-            5_000,
-            r = 200.0,
+            10_000,
+            r = 300.0,
             centralMass = 50_000.0,
             totalSatelliteMass = 5_000.0
         )
         val disc2 = BodyFactory.makeGalaxyDisk(
-            2500,
-            y = Config.HEIGHT_PX * 0.3,
-            vx = -100.0,
+            0,
+            y = Config.HEIGHT_PX * 0.2,
+            vx = -30.0,
             r = 100.0,
             centralMass = 5_000.0,
             totalSatelliteMass = 500.0

@@ -22,18 +22,18 @@ object Config {
     var theta: Double = 0.30  // Barnes–Hut θ
 
     /** Радиус создаваемого диска при клике. */
-    var R = 150.0
+    var R = 100.0
 
     /** Количество тел, добавляемых при создании нового диска. */
-    var N = 2000
+    var N = 5_000
 
     /** Масса центрального тела кеплеровского диска. */
-    const val CENTRAL_MASS = 100_000.0
+    const val CENTRAL_MASS = 50_000.0
 
     /** Минимально допустимый радиус спутника от центра. */
     const val MIN_R = 8.0
 
     /** Суммарная масса спутников кеплеровского диска. */
-    const val TOTAL_SATELLITE_MASS = 10_000.0
+    const val TOTAL_SATELLITE_MASS = 5_000.0
 
 }
