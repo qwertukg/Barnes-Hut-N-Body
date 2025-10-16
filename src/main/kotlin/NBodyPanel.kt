@@ -84,13 +84,14 @@ class NBodyPanel : JPanel() {
             totalSatelliteMass = 5_000.0
         )
         val disc2 = BodyFactory.makeGalaxyDisk(
-            0,
+            2_500,
             y = Config.HEIGHT_PX * 0.2,
-            vx = -30.0,
+            vx = -50.0,
             r = 100.0,
             centralMass = 5_000.0,
             totalSatelliteMass = 500.0
         )
+
         return (disc1 + disc2).toMutableList()
     }
 
@@ -259,6 +260,12 @@ class NBodyPanel : JPanel() {
         bind("RIGHT") { pan(+panStepScreen, 0.0) }
         bind("UP")    { pan(0.0, -panStepScreen) }
         bind("DOWN")  { pan(0.0, +panStepScreen) }
+
+        bind("C") {
+            val cloud = BodyFactory.makeUniformRandom(n = 5_000, m = 0.5)
+            val bodies = (engine.getBodies() + cloud).toMutableList()
+            engine.resetBodies(bodies)
+        }
     }
 
     /** Один кадр визуализации и, при необходимости, шаг симуляции. */
@@ -330,6 +337,7 @@ class NBodyPanel : JPanel() {
         g2.drawString("Zoom [WHEEL] = $zoom", 10, 180)
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 200)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 220)
+        g2.drawString("Create bodies cloud [C]", 10, 240)
         Toolkit.getDefaultToolkit().sync()
     }
 }

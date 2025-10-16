@@ -149,4 +149,31 @@ object BodyFactory {
         return bodies
     }
 
+    /**
+     * Равномерно и независимо размещает по всей области экрана [0..WIDTH_PX)×[0..HEIGHT_PX)
+     * n одинаковых тел с массой m. Начальные скорости — нулевые.
+     *
+     * @param n   количество тел
+     * @param m   масса каждого тела (должна быть > 0)
+     * @param rng генератор случайных чисел (по умолчанию фиксированный seed для повторяемости)
+     */
+    fun makeUniformRandom(
+        n: Int,
+        m: Double,
+        rng: Random = Random(Random.nextLong())
+    ): MutableList<Body> {
+        if (n <= 0 || m <= 0.0) return mutableListOf()
+
+        val bodies = ArrayList<Body>(n)
+        val w = Config.WIDTH_PX.toDouble()
+        val h = Config.HEIGHT_PX.toDouble()
+
+        repeat(n) {
+            val x = rng.nextDouble() * w
+            val y = rng.nextDouble() * h
+            bodies += Body(x, y, 0.0, 0.0, m)
+        }
+        return bodies
+    }
+
 }
