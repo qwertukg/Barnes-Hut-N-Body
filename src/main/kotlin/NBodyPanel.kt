@@ -131,9 +131,13 @@ class NBodyPanel : JPanel() {
     private fun setupMouse() {
         val mouse = object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
-                if (e.button == MouseEvent.BUTTON1) {
+                if (e.button == MouseEvent.BUTTON1 || e.button == MouseEvent.BUTTON3) {
                     dragStart = e.point
                     dragCurrent = e.point
+                    when (e.button) {
+                        MouseEvent.BUTTON1 -> uiR = Config.R
+                        MouseEvent.BUTTON3 -> uiR = Config.MIN_R
+                    }
                     repaint()
                 }
                 if (e.button == MouseEvent.BUTTON2) {
@@ -148,7 +152,7 @@ class NBodyPanel : JPanel() {
                 }
             }
             override fun mouseReleased(e: MouseEvent) {
-                if (e.button == MouseEvent.BUTTON1 && dragStart != null) {
+                if ((e.button == MouseEvent.BUTTON1 || e.button == MouseEvent.BUTTON3) && dragStart != null) {
                     val start = dragStart!!
                     val end = e.point ?: start
                     val dxScreen = (end.x - start.x).toDouble()
@@ -162,8 +166,10 @@ class NBodyPanel : JPanel() {
                     val wx = screenToWorldX(start.x.toDouble())
                     val wy = screenToWorldY(start.y.toDouble())
 
-//                    addKeplerDiskAt(wx, wy, Config.R, Config.N, vx, vy)
-                    addGalaxyDiskAt(wx, wy, Config.R, Config.N, vx, vy)
+                    when (e.button) {
+                        MouseEvent.BUTTON1 -> addGalaxyDiskAt(wx, wy, Config.R, Config.N, vx, vy)
+                        MouseEvent.BUTTON3 -> addGalaxyDiskAt(wx, wy, Config.MIN_R, 0, vx, vy)
+                    }
 
                     dragStart = null
                     dragCurrent = null
@@ -188,6 +194,14 @@ class NBodyPanel : JPanel() {
                     clampView()
                 }
             }
+
+//            override fun mouseClicked(e: MouseEvent) {
+//                if (e.button == MouseEvent.BUTTON3) {
+//                    val wx = screenToWorldX(e.x.toDouble())
+//                    val wy = screenToWorldY(e.y.toDouble())
+//                    addGalaxyDiskAt(wx, wy, 0.0, 0)
+//                }
+//            }
         }
         addMouseListener(mouse)
         addMouseMotionListener(mouse) // для drag
@@ -304,7 +318,7 @@ class NBodyPanel : JPanel() {
             )
             g2.drawLine(sx, sy, ex, ey)
             // Превью радиуса диска — r (мир) → r*zoom (экран)
-            val rScreen = (Config.R * zoom).toInt()
+            val rScreen = (uiR * zoom).toInt()
             g2.drawArc(sx - rScreen, sy - rScreen, rScreen * 2, rScreen * 2, 0, 360)
             g2.stroke = oldStroke
         }
@@ -331,7 +345,7 @@ class NBodyPanel : JPanel() {
 
         // HUD
         g2.color = Color(0, 255, 0)
-        g2.drawString("SPACE — pause | R — reset scene | MOUSE1 DRAG'N'DROP — add kepler disk | ARROWS — cam movement | ESCAPE — exit", 10, 20)
+        g2.drawString("SPACE — pause | R — reset scene | MBL DRAG'N'DROP — add galaxy disk | ARROWS — cam movement | ESCAPE — exit", 10, 20)
         g2.drawString("Disk radius [Q/W] = ${Config.R}", 10, 60)
         g2.drawString("Bodies count [A/S] = ${Config.N}", 10, 80)
         g2.drawString("Theta [Z/X] = ${Config.theta}", 10, 100)
@@ -342,6 +356,7 @@ class NBodyPanel : JPanel() {
         g2.drawString("Bodies count = ${engine.getBodies().size}", 10, 200)
         g2.drawString("Softening = ${Config.SOFTENING}", 10, 220)
         g2.drawString("Create bodies cloud [C]", 10, 240)
+        g2.drawString("Create black hole [MBR DRAG'N'DROP]", 10, 260)
 
         frames++
         val now = System.currentTimeMillis()
@@ -350,8 +365,10 @@ class NBodyPanel : JPanel() {
             frames = 0
             lastSec = now
         }
-        g2.drawString("FPS: $fps", 10, 260) // координаты подгони по вкусу
+        g2.drawString("FPS: $fps", 10, 280) // координаты подгони по вкусу
 
         Toolkit.getDefaultToolkit().sync()
     }
+
+    private var uiR = Config.R
 }
