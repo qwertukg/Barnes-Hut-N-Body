@@ -118,8 +118,8 @@ void main() {
     velocity += acceleration * uDt;
     position += velocity * uDt;
 
-    bodies[id].posMass = vec4(position, mass, 0.0, 0.0);
-    bodies[id].velPad = vec4(velocity, 0.0, 0.0, 0.0);
+    bodies[id].posMass = vec4(position, mass, 0.0);
+    bodies[id].velPad = vec4(velocity, 0.0, 0.0);
 }
 """
 
