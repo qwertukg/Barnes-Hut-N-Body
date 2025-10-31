@@ -11,8 +11,25 @@ repositories {
     mavenCentral()
 }
 
+val lwjglVersion = "3.3.3"
+
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+
+    implementation(platform("org.lwjgl:lwjgl-bom:$lwjglVersion"))
+    implementation("org.lwjgl:lwjgl")
+    implementation("org.lwjgl:lwjgl-glfw")
+    implementation("org.lwjgl:lwjgl-opengl")
+
+    runtimeOnly("org.lwjgl:lwjgl::natives-windows")
+    runtimeOnly("org.lwjgl:lwjgl-glfw::natives-windows")
+    runtimeOnly("org.lwjgl:lwjgl-opengl::natives-windows")
+    runtimeOnly("org.lwjgl:lwjgl::natives-linux")
+    runtimeOnly("org.lwjgl:lwjgl-glfw::natives-linux")
+    runtimeOnly("org.lwjgl:lwjgl-opengl::natives-linux")
+    runtimeOnly("org.lwjgl:lwjgl::natives-macos")
+    runtimeOnly("org.lwjgl:lwjgl-glfw::natives-macos")
+    runtimeOnly("org.lwjgl:lwjgl-opengl::natives-macos")
     testImplementation(kotlin("test"))
 }
 
