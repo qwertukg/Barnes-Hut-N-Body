@@ -4,6 +4,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import org.lwjgl.glfw.GLFW
+import org.lwjgl.glfw.GLFWErrorCallback
+import org.lwjgl.opengl.GL
+import org.lwjgl.opengl.GL46.*
+import org.lwjgl.system.MemoryUtil
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.min
@@ -38,6 +43,268 @@ class Acc {
 
     /** Сбросить значения перед новым расчётом силы для очередного тела. */
     fun reset() { fx = 0.0; fy = 0.0 }
+}
+
+/**
+ * Обёртка над LWJGL/GLSL, выполняющая расчёт гравитации на видеокарте с помощью compute shader.
+ */
+private class GpuIntegrator private constructor() : AutoCloseable {
+
+    companion object {
+        private const val FLOATS_PER_BODY = 8
+        private const val BYTES_PER_BODY = FLOATS_PER_BODY * java.lang.Float.BYTES
+        private const val WORK_GROUP_SIZE = 256
+
+        private const val COMPUTE_SHADER_SOURCE = """
+#version 460 core
+
+layout(local_size_x = ${WORK_GROUP_SIZE}) in;
+
+struct Body {
+    vec4 posMass; // xy = позиция, z = масса
+    vec4 velPad;  // xy = скорость
+};
+
+layout(std430, binding = 0) buffer BodyBuffer {
+    Body bodies[];
+};
+
+uniform float uDt;
+uniform float uSoftening;
+uniform float uG;
+uniform uint uCount;
+
+shared vec4 tilePosMass[${WORK_GROUP_SIZE}];
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uCount) {
+        return;
+    }
+
+    uint localIndex = gl_LocalInvocationID.x;
+
+    Body self = bodies[id];
+    vec2 position = self.posMass.xy;
+    float mass = self.posMass.z;
+    vec2 velocity = self.velPad.xy;
+    vec2 acceleration = vec2(0.0);
+
+    for (uint tile = 0u; tile < uCount; tile += ${WORK_GROUP_SIZE}u) {
+        uint idx = tile + localIndex;
+        if (idx < uCount) {
+            tilePosMass[int(localIndex)] = bodies[idx].posMass;
+        } else {
+            tilePosMass[int(localIndex)] = vec4(0.0);
+        }
+        barrier();
+
+        uint tileSize = min(uCount - tile, uint(${WORK_GROUP_SIZE}));
+        for (uint j = 0u; j < tileSize; ++j) {
+            uint otherIndex = tile + j;
+            if (otherIndex == id) {
+                continue;
+            }
+            vec4 other = tilePosMass[int(j)];
+            vec2 diff = other.xy - position;
+            float distSqr = dot(diff, diff) + uSoftening;
+            float invDist = inversesqrt(distSqr);
+            float invDist3 = invDist * invDist * invDist;
+            acceleration += (uG * other.z) * diff * invDist3;
+        }
+        barrier();
+    }
+
+    velocity += acceleration * uDt;
+    position += velocity * uDt;
+
+    bodies[id].posMass = vec4(position, mass, 0.0, 0.0);
+    bodies[id].velPad = vec4(velocity, 0.0, 0.0, 0.0);
+}
+"""
+
+        fun tryCreate(): GpuIntegrator? = try {
+            GpuIntegrator()
+        } catch (t: Throwable) {
+            System.err.println("[GPU] GPU acceleration disabled: ${t.message}")
+            null
+        }
+    }
+
+    private val window: Long
+    private val program: Int
+    private val ssbo: Int
+    private val uniformDt: Int
+    private val uniformSoftening: Int
+    private val uniformG: Int
+    private val uniformCount: Int
+
+    private var capacityBytes: Long = 0
+    private var dirty = true
+
+    init {
+        GLFWErrorCallback.createPrint(System.err).set()
+        if (!GLFW.glfwInit()) {
+            GLFW.glfwSetErrorCallback(null)?.free()
+            throw IllegalStateException("Unable to initialize GLFW")
+        }
+
+        try {
+            GLFW.glfwDefaultWindowHints()
+            GLFW.glfwWindowHint(GLFW.GLFW_VISIBLE, GLFW.GLFW_FALSE)
+            GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 4)
+            GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 6)
+            GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_PROFILE, GLFW.GLFW_OPENGL_CORE_PROFILE)
+            GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_FORWARD_COMPAT, GLFW.GLFW_TRUE)
+
+            window = GLFW.glfwCreateWindow(1, 1, "gpu-nbody", 0, 0)
+            if (window == 0L) {
+                throw IllegalStateException("Failed to create hidden OpenGL context")
+            }
+        } catch (t: Throwable) {
+            GLFW.glfwTerminate()
+            GLFW.glfwSetErrorCallback(null)?.free()
+            throw t
+        }
+
+        GLFW.glfwMakeContextCurrent(window)
+        GL.createCapabilities()
+
+        program = createProgram()
+        ssbo = glGenBuffers()
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
+        glBufferData(GL_SHADER_STORAGE_BUFFER, 0L, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+
+        uniformDt = glGetUniformLocation(program, "uDt")
+        uniformSoftening = glGetUniformLocation(program, "uSoftening")
+        uniformG = glGetUniformLocation(program, "uG")
+        uniformCount = glGetUniformLocation(program, "uCount")
+    }
+
+    fun onBodiesChanged(bodies: List<Body>) {
+        dirty = true
+        ensureCapacity(bodies.size)
+    }
+
+    fun step(bodies: MutableList<Body>, dt: Float, g: Float, softening: Float) {
+        val count = bodies.size
+        if (count == 0) {
+            return
+        }
+
+        ensureCapacity(count)
+        if (dirty) {
+            uploadBodies(bodies)
+        }
+
+        glUseProgram(program)
+        glUniform1f(uniformDt, dt)
+        glUniform1f(uniformSoftening, softening * softening)
+        glUniform1f(uniformG, g)
+        glUniform1ui(uniformCount, count)
+
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo)
+
+        val groups = (count + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE
+        glDispatchCompute(groups, 1, 1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT or GL_BUFFER_UPDATE_BARRIER_BIT)
+
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
+        val data = MemoryUtil.memAllocFloat(count * FLOATS_PER_BODY)
+        try {
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, data)
+            for (i in 0 until count) {
+                val base = i * FLOATS_PER_BODY
+                val body = bodies[i]
+                body.x = data.get(base).toDouble()
+                body.y = data.get(base + 1).toDouble()
+                body.vx = data.get(base + 4).toDouble()
+                body.vy = data.get(base + 5).toDouble()
+                body.m = data.get(base + 2).toDouble()
+            }
+        } finally {
+            MemoryUtil.memFree(data)
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+            glUseProgram(0)
+        }
+    }
+
+    private fun ensureCapacity(count: Int) {
+        if (count <= 0) {
+            capacityBytes = 0
+            return
+        }
+        val required = count.toLong() * BYTES_PER_BODY
+        if (required > capacityBytes) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
+            glBufferData(GL_SHADER_STORAGE_BUFFER, required, GL_DYNAMIC_DRAW)
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+            capacityBytes = required
+            dirty = true
+        }
+    }
+
+    private fun uploadBodies(bodies: List<Body>) {
+        val count = bodies.size
+        if (count == 0) {
+            return
+        }
+
+        val buffer = MemoryUtil.memAllocFloat(count * FLOATS_PER_BODY)
+        try {
+            for (body in bodies) {
+                buffer.put(body.x.toFloat())
+                buffer.put(body.y.toFloat())
+                buffer.put(body.m.toFloat())
+                buffer.put(0f)
+                buffer.put(body.vx.toFloat())
+                buffer.put(body.vy.toFloat())
+                buffer.put(0f)
+                buffer.put(0f)
+            }
+            buffer.flip()
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, buffer)
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+        } finally {
+            MemoryUtil.memFree(buffer)
+        }
+        dirty = false
+    }
+
+    private fun createProgram(): Int {
+        val shader = glCreateShader(GL_COMPUTE_SHADER)
+        glShaderSource(shader, COMPUTE_SHADER_SOURCE)
+        glCompileShader(shader)
+        if (glGetShaderi(shader, GL_COMPILE_STATUS) != GL_TRUE) {
+            val log = glGetShaderInfoLog(shader)
+            glDeleteShader(shader)
+            throw IllegalStateException("Failed to compile compute shader: $log")
+        }
+
+        val program = glCreateProgram()
+        glAttachShader(program, shader)
+        glLinkProgram(program)
+        if (glGetProgrami(program, GL_LINK_STATUS) != GL_TRUE) {
+            val log = glGetProgramInfoLog(program)
+            glDeleteProgram(program)
+            glDeleteShader(shader)
+            throw IllegalStateException("Failed to link compute shader program: $log")
+        }
+        glDetachShader(program, shader)
+        glDeleteShader(shader)
+        return program
+    }
+
+    override fun close() {
+        glDeleteProgram(program)
+        glDeleteBuffers(ssbo)
+        GLFW.glfwMakeContextCurrent(0)
+        GLFW.glfwDestroyWindow(window)
+        GLFW.glfwTerminate()
+        GLFW.glfwSetErrorCallback(null)?.free()
+    }
 }
 
 /**
@@ -303,6 +570,15 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
     /** Последнее построенное квадродерево (кэш для отрисовки/отладки). */
     private var lastTree: BHTree? = null
 
+    /** GPU-акселератор для расчёта гравитации (если удалось инициализировать LWJGL/GL). */
+    private val gpu = GpuIntegrator.tryCreate()?.also { it.onBodiesChanged(bodies) }
+
+    init {
+        gpu?.let { accelerator ->
+            Runtime.getRuntime().addShutdownHook(Thread { accelerator.close() })
+        }
+    }
+
     // ---------------------- Параметры «пожирания» ----------------------
 
     /**
@@ -346,6 +622,7 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
             ay = DoubleArray(bodies.size)
         }
         lastTree = null
+        gpu?.onBodiesChanged(bodies)
     }
 
     // ----------------------- Внутренняя механика -----------------------
@@ -403,6 +680,29 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
      * 4) Обновляем кэш дерева и запускаем правило слияния (если активировано).
      */
     fun step() {
+        val gpuEngine = gpu
+        if (gpuEngine != null) {
+            if (bodies.isEmpty()) {
+                lastTree = null
+                return
+            }
+
+            gpuEngine.step(
+                bodies,
+                Config.DT.toFloat(),
+                Config.G.toFloat(),
+                Config.SOFTENING.toFloat()
+            )
+
+            val merged = mergeCloseBodiesIfNeeded()
+            if (merged) {
+                gpuEngine.onBodiesChanged(bodies)
+            }
+
+            lastTree = buildTree()
+            return
+        }
+
         // a(t)
         var root = buildTree()
         runBlocking { computeAccelerations(root) }
@@ -460,12 +760,14 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
      * Отключение:
      *  - Чтобы полностью отключить слияния, установите `mergeMinDist <= 0`.
      */
-    private fun mergeCloseBodiesIfNeeded() {
+    private fun mergeCloseBodiesIfNeeded(): Boolean {
         // ранний выход: отключено или слишком мало тел
-        if (mergeMinDist <= 0.0 || bodies.size <= 1) return
+        if (mergeMinDist <= 0.0 || bodies.size <= 1) return false
 
         // Рабочая величина: квадрат пороговой дистанции (без sqrt в цикле)
         val minD2 = mergeMinDist * mergeMinDist
+
+        var changed = false
 
         var i = 0
         while (i < bodies.size) {
@@ -517,6 +819,7 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
                             val bj = bodies[j]
                             bi.m += bj.m
                             bodies.removeAt(j)
+                            changed = true
                         }
                         // Индекс bi мог сдвинуться из-за удалений слева → нормализуем i
                         val newIndex = bodies.indexOf(bi)
@@ -529,5 +832,7 @@ class PhysicsEngine(initialBodies: MutableList<Body>) {
             }
             i++
         }
+
+        return changed
     }
 }
