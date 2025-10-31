@@ -1,1018 +1,760 @@
-@file:JvmName("GpuBarnesHut_FullGPU")
+@file:JvmName("BarnesHutGPU")
 package gpu
 
 import org.lwjgl.glfw.GLFW.*
 import org.lwjgl.glfw.GLFWErrorCallback
 import org.lwjgl.opengl.GL
-import org.lwjgl.opengl.GL46.*
+import org.lwjgl.opengl.GL46C.*
 import org.lwjgl.system.MemoryUtil.NULL
 import kotlin.math.max
+import kotlin.random.Random
 
-/** Полностью-GPU Barnes–Hut (GL 4.6, GLSL 460). CPU только диспатчит шейдеры и рисует. */
-object Config {
-    // Экран
-    const val WIDTH  = 1920
-    const val HEIGHT = 1080
+private object Cfg {
+    const val WIDTH = 1280
+    const val HEIGHT = 720
+    const val LOCAL_SIZE = 256
+    const val MAX_BODIES = 100_000
+    const val MAX_NODES  = 8 * MAX_BODIES      // запас, чтобы не упираться
+    const val START_BODIES = 20_000
 
-    // Размер воркгруппы (256/512/1024 — см. лимиты драйвера)
-    const val WORKGROUP = 256
+    // Физика (как у тебя)
+    const val G = 80.0
+    const val DT = 0.005
+    const val SOFT = 1.0
+    const val THETA = 0.6
+    const val MERGE_MAX_MASS = 4_000.0
+    const val MERGE_MIN_DIST = 2.0  // 0 — отключить merge
 
-    // Физика
-    const val G      = 80.0f
-    const val DT     = 0.005f
-    const val SOFT   = 1.0f
-    const val THETA  = 0.5f
-
-    // Morton / Quadtree (2 бита Morton = 1 уровень)
-    const val MAX_DEPTH = 16
-    const val GRID_W    = 1 shl MAX_DEPTH
-    const val GRID_H    = 1 shl MAX_DEPTH
-
-    // Merge
-    const val MERGE_MIN_DIST = 4.0f
-    const val MERGE_MAX_MASS = 4000.0f
-    const val GRID_CELLS  = 2048                // степень 2
-    const val GRID_BUCKET = 32
-
-    // Radix sort (4-bit): 8 проходов по 32-битным ключам
-    const val RADIX_DIGITS = 16
-
-    // Глубина стека обхода узлов на тело
-    const val STACK_CAP = 256
+    // Размеры структур (std430)
+    const val BODY_BYTES = 48L      // dvec2 + dvec2 + double + int + int
+    const val NODE_BYTES = 128L     // с запасом (выравнивание std430 у double/dvec2)
 }
 
-/* ============================== OpenGL helpers ============================== */
+/* ================= GLFW / GL utils ================= */
 
-private fun compileShader(type: Int, src: String): Int {
-    val id = glCreateShader(type)
-    glShaderSource(id, src)
-    glCompileShader(id)
-    if (glGetShaderi(id, GL_COMPILE_STATUS) == GL_FALSE) {
-        val log = glGetShaderInfoLog(id)
-        glDeleteShader(id)
-        error("Shader compile error:\n$log")
+private fun createWindow(): Long {
+    GLFWErrorCallback.createPrint(System.err).set()
+    if (!glfwInit()) error("GLFW init failed")
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4)
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6)
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+    glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE)
+    val win = glfwCreateWindow(Cfg.WIDTH, Cfg.HEIGHT, "Barnes–Hut GPU (GL46, SSBO)", NULL, NULL)
+    if (win == NULL) error("Window create failed")
+    glfwMakeContextCurrent(win)
+    glfwSwapInterval(0)
+    GL.createCapabilities()
+    return win
+}
+
+private fun compile(type: Int, src: String): Int {
+    val sh = glCreateShader(type)
+    glShaderSource(sh, src)
+    glCompileShader(sh)
+    if (glGetShaderi(sh, GL_COMPILE_STATUS) == GL_FALSE) {
+        val log = glGetShaderInfoLog(sh)
+        throw IllegalStateException("Shader compile error:\n$log")
     }
-    return id
+    return sh
 }
-private fun linkProgram(vararg shaders: Int): Int {
+
+private fun linkProgram(shaders: IntArray): Int {
     val p = glCreateProgram()
-    shaders.forEach { glAttachShader(p, it) }
+    for (s in shaders) glAttachShader(p, s)
     glLinkProgram(p)
     if (glGetProgrami(p, GL_LINK_STATUS) == GL_FALSE) {
         val log = glGetProgramInfoLog(p)
-        shaders.forEach { try { glDeleteShader(it) } catch (_: Throwable) {} }
-        glDeleteProgram(p)
-        error("Program link error:\n$log")
+        throw IllegalStateException("Program link error:\n$log")
     }
-    shaders.forEach { glDetachShader(p, it); glDeleteShader(it) }
+    for (s in shaders) { glDetachShader(p, s); glDeleteShader(s) }
     return p
 }
-private fun createSSBO(binding: Int, bytes: Long, usage: Int = GL_DYNAMIC_DRAW): Int {
+
+private fun ssbo(binding: Int, bytes: Long): Int {
     val id = glGenBuffers()
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, id)
-    glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, usage)
+    glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, GL_DYNAMIC_DRAW)
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, id)
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
     return id
 }
-private fun ceilDiv(a: Int, b: Int) = (a + b - 1) / b
-private fun maxOf(vararg v: Int) = v.max()
 
-/* ============================== Main ============================== */
-
-fun main() {
-    GLFWErrorCallback.createPrint(System.err).set()
-    check(glfwInit()) { "GLFW init failed" }
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4)
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6)
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE)
-
-    val win = glfwCreateWindow(Config.WIDTH, Config.HEIGHT, "Barnes–Hut GPU (GLSL 460)", NULL, NULL)
-    check(win != NULL) { "Window create failed" }
-    glfwMakeContextCurrent(win)
-    glfwSwapInterval(0)
-    GL.createCapabilities()
-
-    try {
-        glEnable(GL_DEBUG_OUTPUT)
-        glDebugMessageCallback({ _, _, _, _, length, message, _ ->
-            val msg = org.lwjgl.system.MemoryUtil.memUTF8(message, length)
-            System.err.println("GL DEBUG: $msg")
-        }, 0)
-    } catch (_: Throwable) {}
-
-    /* ------------------------ Параметры симуляции ------------------------ */
-
-    // Кол-во тел (можешь менять, O(N log N)). Пройдет и 200k+ при нормальном GPU.
-    val N = 200_000
-
-    /* ----------------------------- Буферы ----------------------------- */
-    val floatsPerBody = 6 // pos.xy, vel.xy, mass, pad
-    val bodiesSSBO = createSSBO(0, N.toLong() * floatsPerBody * 4L)       // Bodies
-    val keysSSBO   = createSSBO(1, N.toLong() * 4L)                        // morton
-    val indexSSBO  = createSSBO(2, N.toLong() * 4L)                        // indexIn
-    val keysTmp    = createSSBO(3, N.toLong() * 4L)                        // mortonT
-    val idxTmp     = createSSBO(4, N.toLong() * 4L)                        // indexT
-
-    // Узлы LBVH: внутренние [0..N-2], листья [N-1..2N-2]
-    val nodeU32 = 16
-    val nodesSSBO = createSSBO(5, (2L * N) * nodeU32 * 4L)
-
-    // Стек обхода узлов: STACK_CAP uint на тело
-    val stackSSBO = createSSBO(6, N.toLong() * Config.STACK_CAP * 4L)
-
-    // Merge (hash grid) + dead flags
-    val gridHeadsSSBO = createSSBO(7, Config.GRID_CELLS.toLong() * 4L)
-    val gridListSSBO  = createSSBO(8, (Config.GRID_CELLS * Config.GRID_BUCKET).toLong() * 4L)
-    val deadFlagsSSBO = createSSBO(9, N.toLong() * 4L) // uint 0/1
-
-    // Ускорения ax, ay
-    val accelSSBO = createSSBO(10, N.toLong() * 2L * 4L)
-
-    // Radix sort промежуточные: counts, prefix, globals, globals-scan
-    val blocks = ceilDiv(N, Config.WORKGROUP)
-    val countsSSBO      = createSSBO(11, blocks.toLong() * Config.RADIX_DIGITS * 4L) // [blocks][16]
-    val prefixSSBO      = createSSBO(12, blocks.toLong() * Config.RADIX_DIGITS * 4L) // [blocks][16]
-    val globalsSSBO     = createSSBO(13, Config.RADIX_DIGITS.toLong() * 4L)          // [16]
-    val globalsScanSSBO = createSSBO(14, Config.RADIX_DIGITS.toLong() * 4L)          // [16]
-
-    // SSBO для корня дерева (uint rootIdx[1])
-    val rootSSBO = createSSBO(15, 4L)
-
-    /* ----------------------------- Шейдеры ----------------------------- */
-    val csInitBodies   = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.initBodies))
-    val csMorton       = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.morton))
-
-    val csRadixCount   = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.radixCount))
-    val csRadixPrefix  = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.radixPrefix))
-    val csRadixScatter = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.radixScatter))
-
-    val csReindexBodies = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.reindexBodies))
-    val csBuildNodes    = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.buildNodesLBVH))
-    val csMassLeaves    = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.massLeaves))
-    val csMassLevels    = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.massReduceLevels))
-
-    val csRootClear = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.rootClear))
-    val csFindRoot  = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.findRoot))
-
-    val csAccel    = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.accumulateForces))
-    val csKickHalf = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.kickHalf))
-    val csDrift    = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.drift))
-
-    val csGridClear = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.gridClear))
-    val csGridFill  = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.gridFill))
-    val csMerge     = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.mergeBodies))
-    val csCompact   = linkProgram(compileShader(GL_COMPUTE_SHADER, Shaders.compactDead))
-
-    val vsRender = compileShader(GL_VERTEX_SHADER, Shaders.vsRender)
-    val fsRender = compileShader(GL_FRAGMENT_SHADER, Shaders.fsRender)
-    val progRender = linkProgram(vsRender, fsRender)
-
+private fun vaoForDraw(count: Int): Int {
     val vao = glGenVertexArrays()
+    val vbo = glGenBuffers()
     glBindVertexArray(vao)
-
-    /* ----------------------------- UBO ----------------------------- */
-    val ubo = glGenBuffers()
-    glBindBuffer(GL_UNIFORM_BUFFER, ubo)
-    glBufferData(GL_UNIFORM_BUFFER, 64, GL_DYNAMIC_DRAW)
-    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo)
-    fun updateUBO() {
-        glBindBuffer(GL_UNIFORM_BUFFER, ubo)
-        val bb = org.lwjgl.BufferUtils.createByteBuffer(64)
-        bb.putFloat(Config.G)
-        bb.putFloat(Config.DT)
-        bb.putFloat(Config.SOFT)
-        bb.putFloat(Config.THETA)
-        bb.putInt(Config.WIDTH); bb.putInt(Config.HEIGHT)
-        bb.putFloat(Config.MERGE_MIN_DIST)
-        bb.putFloat(Config.MERGE_MAX_MASS)
-        bb.flip()
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, bb)
-        glBindBuffer(GL_UNIFORM_BUFFER, 0)
-    }
-    updateUBO()
-
-    /* ----------------------------- Инициализация тел ----------------------------- */
-    glUseProgram(csInitBodies)
-    glUniform1i(glGetUniformLocation(csInitBodies, "uCount"), N)
-    glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT or GL_BUFFER_UPDATE_BARRIER_BIT)
-
-    /* ============================= Рендер-цикл ============================= */
-    while (!glfwWindowShouldClose(win)) {
-        glfwPollEvents()
-
-        // ====== a) Построение дерева @ t ======
-        dispatchMortonSortBuildMass(N, blocks,
-            csMorton, csRadixCount, csRadixPrefix, csRadixScatter,
-            csReindexBodies, csBuildNodes, csMassLeaves, csMassLevels,
-            csRootClear, csFindRoot
-        )
-
-        // ====== b) a(t) ======
-        glUseProgram(csAccel)
-        glUniform1i(glGetUniformLocation(csAccel, "uCount"), N)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-        // ====== c) kick(dt/2) ======
-        glUseProgram(csKickHalf)
-        glUniform1i(glGetUniformLocation(csKickHalf, "uCount"), N)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-        // ====== d) drift(dt) ======
-        glUseProgram(csDrift)
-        glUniform1i(glGetUniformLocation(csDrift, "uCount"), N)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-        // ====== e) Построение дерева @ t+dt ======
-        dispatchMortonSortBuildMass(N, blocks,
-            csMorton, csRadixCount, csRadixPrefix, csRadixScatter,
-            csReindexBodies, csBuildNodes, csMassLeaves, csMassLevels,
-            csRootClear, csFindRoot
-        )
-
-        // ====== f) a(t+dt) ======
-        glUseProgram(csAccel)
-        glUniform1i(glGetUniformLocation(csAccel, "uCount"), N)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-        // ====== g) kick(dt/2) ======
-        glUseProgram(csKickHalf)
-        glUniform1i(glGetUniformLocation(csKickHalf, "uCount"), N)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-        // ====== h) MERGE (+compact) ======
-        if (Config.MERGE_MIN_DIST > 0f) {
-            glUseProgram(csGridClear)
-            glDispatchCompute(
-                ceilDiv(maxOf(Config.GRID_CELLS, Config.GRID_CELLS * Config.GRID_BUCKET), Config.WORKGROUP),
-                1, 1
-            )
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-            glUseProgram(csGridFill)
-            glUniform1i(glGetUniformLocation(csGridFill, "uCount"), N)
-            glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-            glUseProgram(csMerge)
-            glUniform1i(glGetUniformLocation(csMerge, "uCount"), N)
-            glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-            glUseProgram(csCompact)
-            glUniform1i(glGetUniformLocation(csCompact, "uCount"), N)
-            glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-        }
-
-        // ====== i) Рендер из SSBO ======
-        glViewport(0, 0, Config.WIDTH, Config.HEIGHT)
-        glClearColor(0f, 0f, 0f, 1f)
-        glClear(GL_COLOR_BUFFER_BIT)
-        glUseProgram(progRender)
-        glUniform2f(glGetUniformLocation(progRender, "uScreen"), Config.WIDTH.toFloat(), Config.HEIGHT.toFloat())
-        glDrawArrays(GL_POINTS, 0, N)
-        glfwSwapBuffers(win)
-    }
-
-    glfwDestroyWindow(win)
-    glfwTerminate()
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, (count * 4L), GL_STATIC_DRAW) // uint per vertex
+    val arr = java.nio.ByteBuffer
+        .allocateDirect(count * 4)
+        .order(java.nio.ByteOrder.nativeOrder())
+        .asIntBuffer()
+    for (i in 0 until count) arr.put(i)
+    arr.flip()
+    glBufferSubData(GL_ARRAY_BUFFER, 0, arr)
+    glEnableVertexAttribArray(0)
+    glVertexAttribIPointer(0, 1, GL_UNSIGNED_INT, 4, 0L)
+    glBindVertexArray(0)
+    return vao
 }
 
-/* ——— Morton→Radix→Reindex→BuildNodes→Mass→Root (вынесено в функцию) ——— */
-private fun dispatchMortonSortBuildMass(
-    N: Int, blocks: Int,
-    csMorton: Int, csRadixCount: Int, csRadixPrefix: Int, csRadixScatter: Int,
-    csReindexBodies: Int, csBuildNodes: Int, csMassLeaves: Int, csMassLevels: Int,
-    csRootClear: Int, csFindRoot: Int
-) {
-    // Morton
-    glUseProgram(csMorton)
-    glUniform1i(glGetUniformLocation(csMorton, "uCount"), N)
-    glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+private fun groups(n: Int) = (n + Cfg.LOCAL_SIZE - 1) / Cfg.LOCAL_SIZE
 
-    // Radix (8 проходов по 4 бита)
-    repeat(8) { pass ->
-        // Count
-        glUseProgram(csRadixCount)
-        glUniform1i(glGetUniformLocation(csRadixCount, "uCount"), N)
-        glUniform1i(glGetUniformLocation(csRadixCount, "uPass"), pass)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+/* ================== Init data ================== */
 
-        // Prefix (по блокам) — всё на GPU
-        glUseProgram(csRadixPrefix)
-        glUniform1i(glGetUniformLocation(csRadixPrefix, "uBlocks"), blocks)
-        glDispatchCompute(1, 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+private fun initBodies(permSSBO: Int, bodySSBO: Int, bodyCount: Int) {
+    // perm[i] = i
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, permSSBO)
+    val pbuf = glMapBufferRange(
+        GL_SHADER_STORAGE_BUFFER, 0, (Cfg.MAX_BODIES * 4L),
+        GL_MAP_WRITE_BIT or GL_MAP_INVALIDATE_BUFFER_BIT
+    )!!.order(java.nio.ByteOrder.nativeOrder()).asIntBuffer()
+    for (i in 0 until bodyCount) pbuf.put(i)
+    for (i in bodyCount until Cfg.MAX_BODIES) pbuf.put(0)
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER)
 
-        // Scatter
-        glUseProgram(csRadixScatter)
-        glUniform1i(glGetUniformLocation(csRadixScatter, "uCount"), N)
-        glUniform1i(glGetUniformLocation(csRadixScatter, "uPass"), pass)
-        glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+    // ---- Body в std430 = 48 байт ----
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bodySSBO)
+    val total = Cfg.MAX_BODIES * Cfg.BODY_BYTES
+    val bb = glMapBufferRange(
+        GL_SHADER_STORAGE_BUFFER, 0, total,
+        GL_MAP_WRITE_BIT or GL_MAP_INVALIDATE_BUFFER_BIT
+    )!!.order(java.nio.ByteOrder.nativeOrder())
 
-        // ping-pong: morton<->mortonT, indexIn<->indexT
-        swapSSBO(1, 3); swapSSBO(2, 4)
+    fun putBody(i: Int, x: Double, y: Double, vx: Double, vy: Double, m: Double) {
+        val base = i * Cfg.BODY_BYTES.toInt()
+        bb.putDouble(base +  0, x)   // pos.x
+        bb.putDouble(base +  8, y)   // pos.y
+        bb.putDouble(base + 16, vx)  // vel.x
+        bb.putDouble(base + 24, vy)  // vel.y
+        bb.putDouble(base + 32, m)   // m
+        bb.putInt   (base + 40, 1)   // alive
+        bb.putInt   (base + 44, 0)   // pad
     }
 
-    // Перепорядочить тела
-    glUseProgram(csReindexBodies)
-    glUniform1i(glGetUniformLocation(csReindexBodies, "uCount"), N)
-    glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-    // Узлы (внутренних N-1)
-    glUseProgram(csBuildNodes)
-    glUniform1i(glGetUniformLocation(csBuildNodes, "uCount"), N)
-    glDispatchCompute(ceilDiv(N - 1, Config.WORKGROUP), 1, 1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-    // Массы: листья
-    glUseProgram(csMassLeaves)
-    glUniform1i(glGetUniformLocation(csMassLeaves, "uCount"), N)
-    glDispatchCompute(ceilDiv(N, Config.WORKGROUP), 1, 1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-    // Массы: подъём уровнями
-    glUseProgram(csMassLevels)
-    glUniform1i(glGetUniformLocation(csMassLevels, "uCount"), N)
-    for (lvl in Config.MAX_DEPTH downTo 0) {
-        glUniform1i(glGetUniformLocation(csMassLevels, "uLevel"), lvl)
-        glDispatchCompute(ceilDiv(N - 1, Config.WORKGROUP), 1, 1)
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+    val rnd = Random(1)
+    val cx = Cfg.WIDTH * 0.5
+    val cy = Cfg.HEIGHT * 0.5
+    val rMax = (max(Cfg.WIDTH, Cfg.HEIGHT) * 0.45)
+    for (i in 0 until bodyCount) {
+        val a = rnd.nextDouble() * Math.PI * 2.0
+        val r = Math.sqrt(rnd.nextDouble()) * rMax
+        val x = cx + r * kotlin.math.cos(a)
+        val y = cy + r * kotlin.math.sin(a)
+        val v = 30.0 + rnd.nextDouble() * 30.0
+        val vx = -v * kotlin.math.sin(a)
+        val vy =  v * kotlin.math.cos(a)
+        val m  = 1.0 + rnd.nextDouble() * 2.0
+        putBody(i, x, y, vx, vy, m)
     }
-
-    // Root = внутренний узел без parent
-    glUseProgram(csRootClear)
-    glDispatchCompute(1,1,1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-
-    glUseProgram(csFindRoot)
-    glUniform1i(glGetUniformLocation(csFindRoot, "uCount"), N)
-    glDispatchCompute(ceilDiv(N - 1, Config.WORKGROUP), 1, 1)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER)
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
 }
 
-private fun swapSSBO(bindingA: Int, bindingB: Int) {
-    val a = IntArray(1); val b = IntArray(1)
-    glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, bindingA, a)
-    glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, bindingB, b)
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindingA, b[0])
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindingB, a[0])
-}
+/* ================ GLSL sources (fixed) ================ */
 
-/* ============================== ШЕЙДЕРЫ ============================== */
-object Shaders {
+private val commonSSBO = """
+// НЕТ #version здесь!
 
-    /* ---- Общая разметка буферов/ubo ---- */
-    private const val COMMON = """
-#version 460
-layout(std430, binding=0)  buffer Bodies  { float bodies[];  }; // pos.xy, vel.xy, mass, pad
-layout(std430, binding=1)  buffer Keys    { uint  morton[];  };
-layout(std430, binding=2)  buffer Index   { uint  indexIn[]; };
-layout(std430, binding=3)  buffer KeysT   { uint  mortonT[]; };
-layout(std430, binding=4)  buffer IndexT  { uint  indexT[];  };
-layout(std430, binding=5)  buffer Nodes   { uint  nodes[];   };
-layout(std430, binding=6)  buffer Stack   { uint  stackBuf[];};
-layout(std430, binding=7)  buffer GridH   { uint  gridHead[];};
-layout(std430, binding=8)  buffer GridL   { uint  gridList[];};
-layout(std430, binding=9)  buffer Dead    { uint  deadFlags[]; };
-layout(std430, binding=10) buffer Accel   { float accel[];    }; // ax, ay
-layout(std430, binding=11) buffer Counts  { uint  counts[];    }; // [blocks*16]
-layout(std430, binding=12) buffer Prefix  { uint  prefix[];    }; // [blocks*16]
-layout(std430, binding=13) buffer Globals { uint  globals[];   }; // [16]
-layout(std430, binding=14) buffer GScan   { uint  gprefix[];   }; // [16]
-layout(std430, binding=15) buffer Root    { uint  rootIdx[];   }; // [1]
-
-layout(std140, binding=0) uniform Sim {
-    float uG;
-    float uDT;
-    float uSoft;
-    float uTheta;
-    int   uW;
-    int   uH;
-    float uMergeMinDist;
-    float uMergeMaxMass;
+struct Body {
+    dvec2 pos;
+    dvec2 vel;
+    double m;
+    int alive;
+    int pad;
 };
 
-const int   STRIDE = 6;
-const float WIDTH  = float(${Config.WIDTH});
-const float HEIGHT = float(${Config.HEIGHT});
-const int   STACK_CAP = ${Config.STACK_CAP};
+struct Node {
+    dvec2 com;
+    double mass;
+    dvec2 center;
+    double h;
+    int child[4];
+    int body;
+    int level;
+    int lock;
+    int isLeaf;
+    int pad0;
+};
 
-void bodyRead(int i, out vec2 pos, out vec2 vel, out float m) {
-    int o = i*STRIDE;
-    pos = vec2(bodies[o+0], bodies[o+1]);
-    vel = vec2(bodies[o+2], bodies[o+3]);
-    m   = bodies[o+4];
-}
-void bodyWrite(int i, vec2 pos, vec2 vel, float m) {
-    int o = i*STRIDE;
-    bodies[o+0]=pos.x; bodies[o+1]=pos.y;
-    bodies[o+2]=vel.x; bodies[o+3]=vel.y;
-    bodies[o+4]=m;
-}
-void accelWrite(int i, vec2 a){ int o=i*2; accel[o+0]=a.x; accel[o+1]=a.y; }
-vec2 accelRead(int i){ int o=i*2; return vec2(accel[o+0], accel[o+1]); }
-"""
+layout(std430, binding = 0) buffer Bodies { int perm[]; };
+layout(std430, binding = 1) buffer BodyData { Body bodies[]; };
+layout(std430, binding = 2) buffer Nodes    { Node nodes[]; };
 
-    /* ---- Узел дерева ----
-       [0]: size Q16.16
-       [1]: com.x (float bits)
-       [2]: com.y
-       [3]: mass
-       [4..7]: child[0..3] (uint, 0xFFFFFFFF нет; листья: child0 = (leafBodyIdx | 0x80000000))
-       [8]: start(body idx, для листа)
-       [9]: end  (exclusive)
-       [10]: parent (uint или 0xFFFFFFFF)
-       [11]: depth (uint)
-       [12..15]: reserved
-    ------------------------------------------------------------------- */
-    private const val NODES = """
-const uint IDX_NONE = 0xFFFFFFFFu;
-const uint IDX_LEAF_FLAG = 0x80000000u;
-const int  NODE_U32 = 16;
+layout(std430, binding = 3) buffer Globals {
+    int  nodeCount;
+    int  bodyCount;
+    int  maxLevel;
+    double dt;
+    double theta;
+    double soft2;
+    double G;
+    double mergeMaxMass;
+    double mergeMinDist;
+    int  rootIndex;
+    int  needRebuild;
+};
+""".trimIndent()
 
-int  nodeOff(int n){ return n*NODE_U32; }
-bool nodeIsLeaf(int n){ return (nodes[nodeOff(n)+4] & IDX_LEAF_FLAG) != 0u; }
+private fun inject(src: String) = src.replace("#include_common", commonSSBO)
 
-float nodeSize(int n){ return float(int(nodes[nodeOff(n)+0]))/65536.0; }
-void  nodeSetSize(int n, float s){ nodes[nodeOff(n)+0]=uint(int(round(s*65536.0))); }
-vec2  nodeCom(int n){ return vec2(uintBitsToFloat(nodes[nodeOff(n)+1]), uintBitsToFloat(nodes[nodeOff(n)+2])); }
-float nodeMass(int n){ return uintBitsToFloat(nodes[nodeOff(n)+3]); }
-void  nodeSetComMass(int n, vec2 c, float m){
-    nodes[nodeOff(n)+1]=floatBitsToUint(c.x);
-    nodes[nodeOff(n)+2]=floatBitsToUint(c.y);
-    nodes[nodeOff(n)+3]=floatBitsToUint(m);
-}
-void  nodeSetLeaf(int n, int bodyIdx, float s, uint parent, uint depth){
-    int o=nodeOff(n);
-    nodes[o+0]=uint(int(round(s*65536.0)));
-    nodes[o+1]=0u; nodes[o+2]=0u; nodes[o+3]=0u;
-    nodes[o+4]=uint(bodyIdx)|IDX_LEAF_FLAG;
-    nodes[o+5]=IDX_NONE; nodes[o+6]=IDX_NONE; nodes[o+7]=IDX_NONE;
-    nodes[o+8]=uint(bodyIdx); nodes[o+9]=uint(bodyIdx+1);
-    nodes[o+10]=parent; nodes[o+11]=depth;
-}
-void  nodeSetInternal(int n, int c0, int c1, int c2, int c3, float s, uint parent, uint depth){
-    int o=nodeOff(n);
-    nodes[o+0]=uint(int(round(s*65536.0)));
-    nodes[o+4]=(c0<0)?IDX_NONE:uint(c0);
-    nodes[o+5]=(c1<0)?IDX_NONE:uint(c1);
-    nodes[o+6]=(c2<0)?IDX_NONE:uint(c2);
-    nodes[o+7]=(c3<0)?IDX_NONE:uint(c3);
-    nodes[o+8]=0u; nodes[o+9]=0u;
-    nodes[o+10]=parent; nodes[o+11]=depth;
-}
-"""
-
-    /* ======================= INIT ======================= */
-    val initBodies = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-
+private val csReset = """
+#version 460 core
+layout(local_size_x = 256) in;
+#include_common
+uniform dvec2 uWindow;
 void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    float t = float(i)/float(max(uCount-1,1));
-    float ang = t*6.2831853*4.0;
-    float r = 0.2 + 0.75*t;
-    vec2 c = vec2(WIDTH*0.5, HEIGHT*0.5);
-    vec2 pos = c + vec2(cos(ang), sin(ang))*r*min(WIDTH,HEIGHT)*0.45;
-    vec2 vel = vec2(-sin(ang), cos(ang))*35.0;
-    bodyWrite(i,pos,vel,1.0);
-    deadFlags[i]=0u;
+    if (gl_GlobalInvocationID.x != 0) return;
+
+    // НЕ трогаем bodyCount — он уже установлен с CPU один раз
+    nodeCount = 1;
+    rootIndex = 0;
+    maxLevel  = 0;
+    needRebuild = 0;
+
+    dt = ${Cfg.DT};
+    theta = ${Cfg.THETA};
+    soft2 = ${Cfg.SOFT*Cfg.SOFT};
+    G = ${Cfg.G};
+    mergeMaxMass = ${Cfg.MERGE_MAX_MASS};
+    mergeMinDist = ${Cfg.MERGE_MIN_DIST};
+
+    Node n;
+    n.com    = dvec2(0.0);
+    n.mass   = 0.0;
+    n.center = dvec2(uWindow.x*0.5, uWindow.y*0.5);
+    double _half = (uWindow.x > uWindow.y ? uWindow.x : uWindow.y)*0.5 + 2.0;
+    n.h = _half*0.5;
+    n.child[0]=n.child[1]=n.child[2]=n.child[3]=-1;
+    n.body  = -1;
+    n.level = 0;
+    n.lock  = 0;
+    n.isLeaf= 1;
+    n.pad0  = 0;
+    nodes[0]= n;
 }
-"""
+""".trimIndent()
 
-    /* ======================= MORTON ======================= */
-    val morton = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
+private val csBuild = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
 
-uint expandBits(uint v){
-    v = (v * 0x00010001u) & 0xFF0000FFu;
-    v = (v * 0x00000101u) & 0x0F00F00Fu;
-    v = (v * 0x00000011u) & 0xC30C30C3u;
-    v = (v * 0x00000005u) & 0x49249249u;
-    return v;
+uvec2 dpack(double x){ return unpackDouble2x32(x); }
+
+int newNode(int parentLevel, dvec2 center, double h){
+    int idx = atomicAdd(nodeCount, 1);
+    // Безопасность: если вдруг переполнили пул — откат на последний валидный
+    if (idx < 0) idx = 0;
+    Node n;
+    n.com = dvec2(0.0);
+    n.mass = 0.0;
+    n.center = center;
+    n.h = h;
+    n.child[0]=n.child[1]=n.child[2]=n.child[3]=-1;
+    n.body = -1;
+    n.level = parentLevel + 1;
+    n.lock = 0;
+    n.isLeaf = 1;
+    n.pad0 = 0;
+    nodes[idx] = n;
+    atomicMax(maxLevel, n.level);
+    return idx;
 }
-uint morton2D(uint x, uint y){ return (expandBits(x) << 1) | expandBits(y); }
 
-void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    vec2 p; vec2 v; float m; bodyRead(i,p,v,m);
-    float nx=clamp(p.x/WIDTH,0.0,0.999999);
-    float ny=clamp(p.y/HEIGHT,0.0,0.999999);
-    uint gx=uint(nx*float(${Config.GRID_W}));
-    uint gy=uint(ny*float(${Config.GRID_H}));
-    morton[i]  = morton2D(gx,gy);
-    indexIn[i] = uint(i);
+int childIndex(Node n, dvec2 p){
+    int ix = (p.x < n.center.x) ? 0 : 1;
+    int iy = (p.y < n.center.y) ? 0 : 2;
+    return ix + iy;
 }
-"""
 
-    /* ======================= RADIX: Count → Prefix → Scatter ======================= */
+void insertBody(int bi){
+    Body b = bodies[bi];
+    if (b.alive == 0) return;
 
-    val radixCount = """
-#version 460
-layout(local_size_x=${Config.WORKGROUP}) in;
-layout(std430, binding=1)  buffer Keys   { uint morton[]; };
-layout(std430, binding=11) buffer Counts { uint counts[]; }; // [blocks*16]
-uniform int uCount;
-uniform int uPass;
+    int cur = rootIndex;
 
-shared uint sHist[16];
+    for (int safety=0; safety<1024; ++safety){
+        // lock
+        while (atomicCompSwap(nodes[cur].lock, 0, 1) != 0) { }
+        Node n = nodes[cur];
 
-void main(){
-    uint gid = gl_GlobalInvocationID.x;
-    uint lid = gl_LocalInvocationID.x;
-    uint grp = gl_WorkGroupID.x;
+        if (n.isLeaf == 1){
+            if (n.body < 0){
+                n.body = bi;
+                nodes[cur] = n;
+                nodes[cur].lock = 0;
+                return;
+            } else {
+                int oldBody = n.body;
+                n.body = -1;
+                n.isLeaf = 0;
+                double hh = n.h * 0.5;
+                int c0 = newNode(n.level, dvec2(n.center.x - hh, n.center.y - hh), hh);
+                int c1 = newNode(n.level, dvec2(n.center.x + hh, n.center.y - hh), hh);
+                int c2 = newNode(n.level, dvec2(n.center.x - hh, n.center.y + hh), hh);
+                int c3 = newNode(n.level, dvec2(n.center.x + hh, n.center.y + hh), hh);
+                n.child[0]=c0; n.child[1]=c1; n.child[2]=c2; n.child[3]=c3;
+                nodes[cur] = n;
+                nodes[cur].lock = 0;
 
-    if (lid < 16u) sHist[lid]=0u;
-    barrier();
+                if (n.h < 1e-3){
+                    Body ob = bodies[oldBody];
+                    double eps = 1e-3;
+                    uvec2 wx = dpack(ob.pos.x);
+                    uvec2 wy = dpack(ob.pos.y);
+                    ob.pos.x += ((wx.x & 1u)==0u) ? +eps : -eps;
+                    ob.pos.y += ((wy.x & 1u)==0u) ? -eps : +eps;
+                    bodies[oldBody] = ob;
+                }
 
-    uint numGroups = gl_NumWorkGroups.x;
-    uint L = gl_WorkGroupSize.x;
-    for (uint i = gid; i < uint(uCount); i += numGroups*L) {
-        uint key = morton[i];
-        uint d   = (key >> (uPass*4)) & 0xFu;
-        atomicAdd(sHist[d], 1u);
+                // вставить oldBody вниз
+                int target = cur;
+                Body ob2 = bodies[oldBody];
+                for (int s2=0; s2<1024; ++s2){
+                    while (atomicCompSwap(nodes[target].lock,0,1)!=0) {}
+                    Node nn = nodes[target];
+                    if (nn.isLeaf==1 && nn.body<0){
+                        nn.body = oldBody; nodes[target]=nn; nodes[target].lock=0; break;
+                    }
+                    int ci = childIndex(nn, ob2.pos);
+                    int nxt = nn.child[ci];
+                    nodes[target].lock=0;
+                    if (nxt < 0) { // страховка
+                        break;
+                    }
+                    target = nxt;
+                }
+                // продолжаем вставку bi с вершины cur — цикл сам вернёт нас
+            }
+        } else {
+            int ci = childIndex(n, b.pos);
+            int nxt = n.child[ci];
+            nodes[cur].lock = 0;
+            if (nxt < 0) { // страховка от гонки
+                continue;
+            }
+            cur = nxt;
+        }
     }
-    barrier();
-
-    if (lid < 16u) {
-        counts[grp*16u + lid] = sHist[lid];
-    }
 }
-"""
-
-    val radixPrefix = """
-#version 460
-layout(local_size_x=16) in;
-layout(std430, binding=11) buffer Counts  { uint counts[];  };
-layout(std430, binding=12) buffer Prefix  { uint prefix[];  };
-layout(std430, binding=13) buffer Globals { uint globals[]; };
-layout(std430, binding=14) buffer GScan   { uint gprefix[]; };
-uniform int uBlocks;
 
 void main(){
-    uint d = gl_LocalInvocationID.x; // 0..15
-    if (uBlocks<=0) {
-        if (d==0u){ for(int k=0;k<16;k++){ globals[k]=0u; gprefix[k]=0u; } }
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= uint(bodyCount)) return;
+    int bi = perm[g];
+    insertBody(bi);
+}
+""".trimIndent()
+
+private val csMass = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
+uniform int uLevel;
+void main(){
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(nodeCount)) return;
+    Node n = nodes[idx];
+    if (n.level != uLevel) return;
+
+    if (n.isLeaf == 1){
+        if (n.body >= 0){
+            Body b = bodies[n.body];
+            if (b.alive == 1){ n.mass = b.m; n.com = b.pos; }
+            else { n.mass = 0.0; n.com = n.center; }
+        } else { n.mass = 0.0; n.com = n.center; }
+        nodes[idx] = n;
         return;
     }
 
-    // 1) По каждому digit: префикс по блокам
-    uint acc = 0u;
-    for (int b=0; b<uBlocks; ++b){
-        uint c = counts[uint(b)*16u + d];
-        prefix[uint(b)*16u + d] = acc;
-        acc += c;
+    double mSum = 0.0;
+    dvec2 c = dvec2(0.0);
+    for (int k=0;k<4;k++){
+        int ci = n.child[k]; if (ci<0) continue;
+        Node ch = nodes[ci];
+        if (ch.mass > 0.0){ mSum += ch.mass; c += ch.com * ch.mass; }
     }
-    globals[d] = acc; // totals per digit
-
-    barrier();
-
-    // 2) Эксклюзивный префикс глобальных totals
-    if (d==0u) {
-        uint run=0u;
-        for (int k=0;k<16;k++){ uint v = globals[k]; gprefix[k]=run; run+=v; }
-    }
+    n.mass = mSum;
+    n.com  = (mSum>0.0)?(c/mSum):n.center;
+    nodes[idx]=n;
 }
-"""
+""".trimIndent()
 
-    val radixScatter = """
-#version 460
-layout(local_size_x=${Config.WORKGROUP}) in;
-layout(std430, binding=1)  buffer Keys   { uint morton[];  };
-layout(std430, binding=2)  buffer Index  { uint indexIn[]; };
-layout(std430, binding=3)  buffer KeysT  { uint mortonT[]; };
-layout(std430, binding=4)  buffer IndexT { uint indexT[];  };
-layout(std430, binding=11) buffer Counts { uint counts[];  };
-layout(std430, binding=12) buffer Prefix { uint prefix[];  };
-layout(std430, binding=14) buffer GScan  { uint gprefix[]; };
-uniform int uCount;
-uniform int uPass;
+private val csAccel = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
+layout(std430, binding = 5) buffer AccelX { double ax[]; };
+layout(std430, binding = 6) buffer AccelY { double ay[]; };
 
-shared uint sOff[16];
-
-void main(){
-    uint lid = gl_LocalInvocationID.x;
-    uint grp = gl_WorkGroupID.x;
-    uint L   = gl_WorkGroupSize.x;
-    uint numGroups = gl_NumWorkGroups.x;
-
-    if (lid < 16u) sOff[lid]=0u;
-    barrier();
-
-    for (uint i = grp*L + lid; i < uint(uCount); i += numGroups*L) {
-        uint key = morton[i];
-        uint idx = indexIn[i];
-        uint d   = (key >> (uPass*4)) & 0xFu;
-
-        uint base = gprefix[d] + prefix[grp*16u + d];
-        uint off  = atomicAdd(sOff[d], 1u);
-        uint dst  = base + off;
-
-        mortonT[dst] = key;
-        indexT[dst]  = idx;
-    }
-}
-"""
-
-    /* ======================= REINDEX BODIES ======================= */
-    val reindexBodies = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    uint src=indexIn[i];
-    vec2 p; vec2 v; float m; bodyRead(int(src),p,v,m);
-    bodyWrite(i,p,v,m);
-    deadFlags[i]=deadFlags[int(src)];
-}
-"""
-
-    /* ======================= BUILD NODES (LBVH) ======================= */
-    val buildNodesLBVH = """
-$COMMON
-$NODES
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-
-int cplInt(uint a, uint b){ if(a==b) return 32; return 31 - findMSB(a ^ b); }
-int cplMortonIdx(int i, int j){
-    if(j<0 || j>=uCount) return -1;
-    uint a=morton[i], b=morton[j];
-    int c=cplInt(a,b);
-    if(a==b) { // различаем индексы, чтобы не схлопывалось
-        int di = (i==j)?32:(31 - findMSB(uint(i ^ j)));
-        return 32 + di;
-    }
-    return c;
-}
-int depthFromCpl(int cplBits){ return max(0, cplBits/2); }
-float sizeFromDepth(int depth){
-    float root=float(max(uW,uH));
-    return root / pow(2.0, float(depth));
+void pointForce(in dvec2 p, in double m, inout double fx, inout double fy,
+                in dvec2 bpos, in double bm, in double soft2, in double G){
+    dvec2 d = p - bpos;
+    double r2 = dot(d,d) + soft2;
+    double invR = inversesqrt(r2);
+    double invR2 = 1.0 / r2;
+    double f = G * bm * m * invR2;
+    double c = f * invR;
+    fx += c * d.x;
+    fy += c * d.y;
 }
 
 void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount-1) return;
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= uint(bodyCount)) return;
+    Body b = bodies[gid];
+    if (b.alive == 0){ ax[gid]=0.0; ay[gid]=0.0; return; }
 
-    // Направление диапазона
-    int d  = (cplMortonIdx(i,i+1)-cplMortonIdx(i,i-1))>=0 ? 1 : -1;
-    int cplm = cplMortonIdx(i, i-d);
-    int lmax = 2;
-    while (cplMortonIdx(i, i + lmax*d) > cplm) lmax <<= 1;
+    double theta2 = theta*theta;
+    int stack[64]; int sp=0; stack[sp++]=rootIndex;
+    double fx=0.0, fy=0.0;
 
-    int l=0;
-    for(int t=lmax>>1; t>=1; t>>=1){
-        if (cplMortonIdx(i, i+(l+t)*d) > cplm) l += t;
-    }
-    int j = i + l*d;
-    int L = min(i,j), R = max(i,j);
-    int cplNode = cplMortonIdx(L,R);
-    int depth   = depthFromCpl(cplNode);
-    float size  = sizeFromDepth(depth);
-
-    // Найти split
-    int c = cplMortonIdx(i,j);
-    int s=0; int step=l;
-    do{
-        step=(step+1)>>1;
-        if (cplMortonIdx(i, i+(s+step)*d) > c) s+=step;
-    }while(step>1);
-    int split = i + s*d;
-
-    // Дети
-    int leftIsLeaf  = (min(i,j)==split)?1:0;
-    int rightIsLeaf = (split+1==max(i,j))?1:0;
-
-    int internal = i;
-    uint parent = IDX_NONE;
-
-    // Левый ребёнок
-    int leftIdx;
-    if (leftIsLeaf==1){
-        leftIdx = uCount-1 + split;
-        nodeSetLeaf(leftIdx, split, size, uint(internal), uint(depth+1));
-    } else {
-        leftIdx = split;
-        nodes[nodeOff(leftIdx)+10] = uint(internal);   // проставляем parent
-    }
-    nodeSetInternal(internal, leftIdx, -1, -1, -1, size, parent, uint(depth));
-
-    // Правый ребёнок
-    int rightIdx;
-    if (rightIsLeaf==1){
-        rightIdx = uCount-1 + (split+1);
-        nodeSetLeaf(rightIdx, split+1, size, uint(internal), uint(depth+1));
-        nodes[nodeOff(internal)+5] = uint(rightIdx);
-    } else {
-        nodes[nodeOff(internal)+5] = uint(split+1);
-        rightIdx = split+1;
-        nodes[nodeOff(rightIdx)+10] = uint(internal);  // проставляем parent
-    }
-
-    nodes[nodeOff(internal)+6] = IDX_NONE;
-    nodes[nodeOff(internal)+7] = IDX_NONE;
-}
-"""
-
-    /* ======================= MASS BOTTOM-UP ======================= */
-    val massLeaves = """
-$COMMON
-$NODES
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-
-void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    int leaf = uCount-1 + i;
-    vec2 p; vec2 v; float m; bodyRead(i,p,v,m);
-    nodeSetComMass(leaf, p, m);
-}
-"""
-
-    val massReduceLevels = """
-$COMMON
-$NODES
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-uniform int uLevel;
-
-void main(){
-    int n=int(gl_GlobalInvocationID.x);
-    if(n >= (uCount-1)) return; // только внутренние
-    if (nodeIsLeaf(n)) return;
-
-    float s = nodeSize(n);
-    float root = float(max(uW,uH));
-    if (s <= 0.0) return;
-    int depth = int(round(log2(root/s)));
-    if (depth != uLevel) return;
-
-    int o = nodeOff(n);
-    uint c0=nodes[o+4], c1=nodes[o+5], c2=nodes[o+6], c3=nodes[o+7];
-
-    float msum=0.0;
-    vec2  csum=vec2(0.0);
-    for(int k=0;k<4;k++){
-        uint ci = (k==0?c0:(k==1?c1:(k==2?c2:c3)));
-        if (ci==IDX_NONE) continue;
-        int child = int(ci & 0x7FFFFFFFu);
-        float m  = nodeMass(child);
-        if (m>0.0){ vec2 c = nodeCom(child); msum += m; csum += c*m; }
-    }
-    if (msum>0.0) nodeSetComMass(n, csum/msum, msum);
-    else          nodeSetComMass(n, vec2(0.0), 0.0);
-}
-"""
-
-    /* ======================= ROOT (clear + find) ======================= */
-    val rootClear = """
-#version 460
-layout(local_size_x=1) in;
-layout(std430, binding=15) buffer Root  { uint rootIdx[]; };
-void main(){ rootIdx[0] = 0xFFFFFFFFu; }
-"""
-
-
-    val findRoot = """
-#version 460
-layout(local_size_x=${Config.WORKGROUP}) in;
-layout(std430, binding=5)  buffer Nodes { uint nodes[]; };
-layout(std430, binding=15) buffer Root  { uint rootIdx[]; };
-
-const uint IDX_NONE = 0xFFFFFFFFu;
-const int  NODE_U32 = 16;
-int nodeOff(int n){ return n*NODE_U32; }
-
-uniform int uCount;
-
-void main(){
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= uint(uCount-1)) return; // только внутренние [0..N-2]
-    uint parent = nodes[nodeOff(int(i))+10];
-    if (parent == IDX_NONE) {
-        atomicMin(rootIdx[0], i);
-    }
-}
-"""
-
-    /* ======================= ACCEL / KICK / DRIFT ======================= */
-    val accumulateForces = """
-$COMMON
-$NODES
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-
-void safePush(int base, inout int sp, uint v){
-    if (sp < STACK_CAP) { stackBuf[base + sp] = v; sp++; }
-}
-
-void addPoint(vec2 p, float m2, inout vec2 f, vec2 bpos, float bm){
-    vec2 d = p - bpos;
-    float r2 = dot(d,d) + uSoft*uSoft;
-    float invR = inversesqrt(r2);
-    float invR2= 1.0/r2;
-    float F = uG * bm * m2 * invR2;
-    f += F * d * invR;
-}
-
-void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount){ return; }
-    if (deadFlags[i]!=0u) { accelWrite(i, vec2(0)); return; }
-
-    vec2 pos; vec2 vel; float m; bodyRead(i,pos,vel,m);
-
-    uint root = rootIdx[0];
-    if (root==0xFFFFFFFFu) { accelWrite(i, vec2(0)); return; }
-
-    int base = i*STACK_CAP; int sp=0;
-    safePush(base, sp, root);
-
-    vec2 F=vec2(0.0);
     while (sp>0){
-        int n = int(stackBuf[base + (--sp)]);
-        if (n<0) continue;
-        if (nodeIsLeaf(n)){
-            uint raw = nodes[nodeOff(n)+4];
-            int bi = int(raw & 0x7FFFFFFFu);
-            if (bi!=i && deadFlags[bi]==0u){
-                vec2 p; vec2 v; float mm; bodyRead(bi,p,v,mm);
-                addPoint(p, mm, F, pos, m);
+        int ni = stack[--sp];
+        Node n = nodes[ni];
+        if (n.mass == 0.0) continue;
+
+        if (n.isLeaf == 1){
+            if (n.body >= 0 && n.body != int(gid)){
+                Body sb = bodies[n.body];
+                if (sb.alive==1) pointForce(sb.pos, sb.m, fx,fy, b.pos, b.m, soft2, G);
             }
+            continue;
+        }
+        dvec2 d = n.com - b.pos;
+        double dist2 = dot(d,d) + soft2;
+        double s2 = (n.h*2.0); s2 = s2*s2;
+
+        if (s2 < theta2 * dist2){
+            pointForce(n.com, n.mass, fx,fy, b.pos, b.m, soft2, G);
         } else {
-            float s = nodeSize(n);
-            vec2  c = nodeCom(n);
-            float mm= nodeMass(n);
-            vec2 d = c - pos;
-            float r2 = dot(d,d) + uSoft*uSoft;
-            float s2 = s*s;
-            if (s2 < (uTheta*uTheta)*r2){
-                addPoint(c, mm, F, pos, m);
-            } else {
-                int o=nodeOff(n);
-                uint c0=nodes[o+4], c1=nodes[o+5], c2=nodes[o+6], c3=nodes[o+7];
-                if (c0!=0xFFFFFFFFu) safePush(base, sp, c0);
-                if (c1!=0xFFFFFFFFu) safePush(base, sp, c1);
-                if (c2!=0xFFFFFFFFu) safePush(base, sp, c2);
-                if (c3!=0xFFFFFFFFu) safePush(base, sp, c3);
-            }
+            for (int k=0;k<4;k++){ int ci=n.child[k]; if (ci>=0) stack[sp++]=ci; }
         }
     }
-    vec2 a = F / max(m,1e-6);
-    accelWrite(i,a);
+    ax[gid] = fx / b.m;
+    ay[gid] = fy / b.m;
 }
-"""
+""".trimIndent()
 
-    val kickHalf = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
+private val csKick = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
+layout(std430, binding = 5) buffer AccelX { double ax[]; };
+layout(std430, binding = 6) buffer AccelY { double ay[]; };
 void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    if(deadFlags[i]!=0u) return;
-    vec2 p; vec2 v; float m; bodyRead(i,p,v,m);
-    vec2 a = accelRead(i);
-    v += a * (0.5 * uDT);
-    bodyWrite(i,p,v,m);
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= uint(bodyCount)) return;
+    if (bodies[gid].alive == 0) return;
+    double dtHalf = dt*0.5;
+    bodies[gid].vel.x += ax[gid]*dtHalf;
+    bodies[gid].vel.y += ay[gid]*dtHalf;
 }
-"""
+""".trimIndent()
 
-    val drift = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
+private val csDrift = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
 void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    if(deadFlags[i]!=0u) return;
-    vec2 p; vec2 v; float m; bodyRead(i,p,v,m);
-    p += v * uDT;
-    if(p.x<0.0) p.x+=WIDTH; if(p.x>=WIDTH) p.x-=WIDTH;
-    if(p.y<0.0) p.y+=HEIGHT; if(p.y>=HEIGHT) p.y-=HEIGHT;
-    bodyWrite(i,p,v,m);
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= uint(bodyCount)) return;
+    if (bodies[gid].alive == 0) return;
+    bodies[gid].pos += bodies[gid].vel * dt;
 }
-"""
+""".trimIndent()
 
-    /* ======================= MERGE ======================= */
-    val gridClear = """
-#version 460
-layout(local_size_x=${Config.WORKGROUP}) in;
-layout(std430, binding=7)  buffer GridH { uint gridHead[]; };
-layout(std430, binding=8)  buffer GridL { uint gridList[]; };
+private val csMerge = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
+layout(std430, binding = 7) buffer Victims  { int victimFlags[]; };
+layout(std430, binding = 8) buffer BodyLocks{ int bodyLock[]; };
+
 void main(){
     uint i = gl_GlobalInvocationID.x;
-    if (i < ${Config.GRID_CELLS}u) gridHead[i] = 0xFFFFFFFFu;
-    uint total = ${Config.GRID_CELLS * Config.GRID_BUCKET}u;
-    if (i < total) gridList[i] = 0xFFFFFFFFu;
-}
-"""
-    val gridFill = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-uint hashCell(ivec2 c){ uint h=uint(c.x)*73856093u ^ uint(c.y)*19349663u; return h & uint(${Config.GRID_CELLS-1}); }
-void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    if(deadFlags[i]!=0u) return;
-    vec2 p; vec2 v; float m; bodyRead(i,p,v,m);
-    ivec2 cell = ivec2(int(p.x)>>5, int(p.y)>>5);
-    uint h = hashCell(cell);
-    for (int k=0;k<${Config.GRID_BUCKET};k++){
-        uint idx = atomicCompSwap(gridList[h*${Config.GRID_BUCKET}+k], 0xFFFFFFFFu, uint(i));
-        if (idx==0xFFFFFFFFu) { gridHead[h]=h; break; }
-    }
-}
-"""
-    val mergeBodies = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
-uint hashCell(ivec2 c){ uint h=uint(c.x)*73856093u ^ uint(c.y)*19349663u; return h & uint(${Config.GRID_CELLS-1}); }
-void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    if(deadFlags[i]!=0u) return;
+    if (i >= uint(bodyCount)) return;
+    Body bi = bodies[i];
+    if (bi.alive == 0) return;
+    if (mergeMinDist <= 0.0) return;
 
-    vec2 pi; vec2 vi; float mi; bodyRead(i,pi,vi,mi);
-    if (mi <= uMergeMaxMass) return;
+    double minD2 = mergeMinDist*mergeMinDist;
 
-    float r2 = uMergeMinDist*uMergeMinDist;
-    ivec2 cell = ivec2(int(pi.x)>>5, int(pi.y)>>5);
-
-    for(int oy=-1;oy<=1;++oy) for(int ox=-1;ox<=1;++ox){
-        ivec2 cc = cell + ivec2(ox,oy);
-        uint h = hashCell(cc);
-        for (int k=0;k<${Config.GRID_BUCKET};k++){
-            uint j = gridList[h*${Config.GRID_BUCKET}+k];
-            if (j==0xFFFFFFFFu || j==uint(i)) continue;
-            if (deadFlags[int(j)]!=0u) continue;
-            vec2 pj; vec2 vj; float mj; bodyRead(int(j),pj,vj,mj);
-            vec2 d=pj-pi;
-            if (dot(d,d) < r2){
-                deadFlags[int(j)]=1u;
-                mi += mj;
+    if (bi.m > mergeMaxMass){
+        for (uint j=0; j<uint(bodyCount); ++j){
+            if (j==i) continue;
+            Body bj = bodies[j];
+            if (bj.alive == 0) continue;
+            dvec2 d = bj.pos - bi.pos;
+            if (dot(d,d) < minD2){
+                if (atomicCompSwap(victimFlags[j], 0, 1) == 0){
+                    while (atomicCompSwap(bodyLock[i], 0, 1) != 0) {}
+                    double mi = bodies[i].m;
+                    mi += bj.m;
+                    bodies[i].m = mi;
+                    bodyLock[i] = 0;
+                }
             }
         }
     }
-    bodyWrite(i,pi,vi,mi);
 }
-"""
-    val compactDead = """
-$COMMON
-layout(local_size_x=${Config.WORKGROUP}) in;
-uniform int uCount;
+""".trimIndent()
+
+private val csCompact = """
+#version 460 core
+layout(local_size_x = ${Cfg.LOCAL_SIZE}) in;
+#include_common
+layout(std430, binding = 7)  buffer Victims  { int victimFlags[]; };
+layout(std430, binding = 9)  buffer ScanTemp { int tmp[]; };
+layout(std430, binding = 10) buffer NewCount { int outCount[]; };
+shared uint blockAlive[${Cfg.LOCAL_SIZE}];
+
 void main(){
-    int i=int(gl_GlobalInvocationID.x);
-    if(i>=uCount) return;
-    if(deadFlags[i]!=0u){
-        vec2 p; vec2 v; float m; bodyRead(i,p,v,m);
-        bodyWrite(i, vec2(-1e6,-1e6), v, 0.0);
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid < uint(bodyCount)){
+        if (victimFlags[gid] == 1 && bodies[gid].alive == 1) bodies[gid].alive = 0;
+    }
+
+    uint lane = gl_LocalInvocationID.x;
+    uint alive = (gid < uint(bodyCount) && bodies[gid].alive==1) ? 1u : 0u;
+    blockAlive[lane] = alive;
+    memoryBarrierShared(); barrier();
+
+    for (uint off=1u; off<gl_WorkGroupSize.x; off<<=1u){
+        uint t = (lane>=off) ? blockAlive[lane-off] : 0u;
+        barrier();
+        blockAlive[lane] += t;
+        barrier();
+    }
+    uint localIndex = (alive==1u) ? (blockAlive[lane]-1u) : 0xffffffffu;
+
+    if (lane == gl_WorkGroupSize.x-1u){
+        tmp[gl_WorkGroupID.x] = int(blockAlive[lane]);
+    }
+    barrier();
+
+    if (gl_WorkGroupID.x==0u && lane==0u){
+        int sum=0;
+        for (uint g=0u; g<gl_NumWorkGroups.x; ++g){
+            int s = tmp[g];
+            tmp[g]=sum;
+            sum+=s;
+        }
+        outCount[0]=sum;
+    }
+    barrier();
+
+    if (alive==1u){
+        int globalIndex = tmp[gl_WorkGroupID.x] + int(localIndex);
+        perm[globalIndex] = int(gid);
+    }
+
+    if (gl_GlobalInvocationID.x==0u){
+        bodyCount = outCount[0];
+        needRebuild = 1;
     }
 }
-"""
+""".trimIndent()
 
-    /* ======================= RENDER (SSBO) ======================= */
-    val vsRender = """
-#version 460
-layout(std430, binding=0) buffer Bodies { float bodies[]; };
-uniform vec2 uScreen;
-const int STRIDE=6;
+private val vsPoints = """
+#version 460 core
+layout(location=0) in uint inIndex;
+#include_common
+uniform vec2 uViewport;
+out float vMass;
 void main(){
-    int i = gl_VertexID;
-    int o = i*STRIDE;
-    vec2 pos = vec2(bodies[o+0], bodies[o+1]);
-    gl_Position = vec4((pos / uScreen * 2.0 - 1.0) * vec2(1,-1), 0.0, 1.0);
-    gl_PointSize = 1.5;
+    int bi = perm[int(inIndex)];
+    Body b = bodies[bi];
+    float x = float((b.pos.x / uViewport.x) * 2.0 - 1.0);
+    float y = float((b.pos.y / uViewport.y) * 2.0 - 1.0);
+    gl_Position = vec4(x,y,0.0,1.0);
+    vMass = float(b.m);
+    gl_PointSize = max(1.0, sqrt(vMass));
 }
-"""
-    val fsRender = """
-#version 460
-out vec4 FragColor;
-void main(){ FragColor = vec4(1,1,1,1); }
-"""
+""".trimIndent()
+
+private val fsPoints = """
+#version 460 core
+in float vMass;
+out vec4 fragColor;
+void main(){
+    float a = clamp(log2(1.0 + max(vMass,1.0))*0.10, 0.15, 1.0);
+    fragColor = vec4(1.0,1.0,1.0,a);
+}
+""".trimIndent()
+
+/* ============================ MAIN ============================ */
+
+fun main() {
+    val win = createWindow()
+
+    // --- SSBOs ---
+    val ssboPerm     = ssbo(0, Cfg.MAX_BODIES * 4L)
+    val ssboBodies   = ssbo(1, Cfg.MAX_BODIES * Cfg.BODY_BYTES)
+    val ssboNodes    = ssbo(2, Cfg.MAX_NODES  * Cfg.NODE_BYTES)
+    val ssboGlobals  = ssbo(3, 256L)          // достаточно
+    val ssboAx       = ssbo(5, Cfg.MAX_BODIES * 8L)
+    val ssboAy       = ssbo(6, Cfg.MAX_BODIES * 8L)
+    val ssboVictims  = ssbo(7, Cfg.MAX_BODIES * 4L)
+    val ssboLocks    = ssbo(8, Cfg.MAX_BODIES * 4L)
+    val ssboScanTmp  = ssbo(9,  (Cfg.MAX_BODIES / Cfg.LOCAL_SIZE + 2) * 4L)
+    val ssboNewCount = ssbo(10, 4L)
+
+    // init data
+    initBodies(ssboPerm, ssboBodies, Cfg.START_BODIES)
+
+    // установить начальный bodyCount в Globals (это не «физика», а размер массива)
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboGlobals)
+    val gbuf = glMapBufferRange(
+        GL_SHADER_STORAGE_BUFFER, 0, 4L * 3 + 8L * 10,
+        GL_MAP_WRITE_BIT or GL_MAP_INVALIDATE_RANGE_BIT
+    )!!.order(java.nio.ByteOrder.nativeOrder())
+    gbuf.asIntBuffer().put(1, Cfg.START_BODIES) // offset 1 = bodyCount
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER)
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+
+    // clear victimFlags/locks перед первым кадром
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboVictims)
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32I, GL_RED_INTEGER, GL_INT, null as java.nio.ByteBuffer?)
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboLocks)
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32I, GL_RED_INTEGER, GL_INT, null as java.nio.ByteBuffer?)
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+
+    // programs
+    fun progCS(src: String) = linkProgram(intArrayOf(compile(GL_COMPUTE_SHADER, src)))
+    fun progDraw(vs: String, fs: String) = linkProgram(intArrayOf(
+        compile(GL_VERTEX_SHADER, vs), compile(GL_FRAGMENT_SHADER, fs)
+    ))
+    val pReset   = progCS(inject(csReset))
+    val pBuild   = progCS(inject(csBuild))
+    val pMass    = progCS(inject(csMass))
+    val pAccel   = progCS(inject(csAccel))
+    val pKick    = progCS(inject(csKick))
+    val pDrift   = progCS(inject(csDrift))
+    val pMerge   = progCS(inject(csMerge))
+    val pCompact = progCS(inject(csCompact))
+    val pDraw    = progDraw(inject(vsPoints), fsPoints)
+
+    // geometry
+    var drawCount = Cfg.START_BODIES
+    val vao = vaoForDraw(Cfg.MAX_BODIES)
+
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_PROGRAM_POINT_SIZE) // важный флаг для размера точек
+
+    // uniforms
+    val uWinReset   = glGetUniformLocation(pReset, "uWindow")
+    val uLevelMass  = glGetUniformLocation(pMass, "uLevel")
+    val uViewport   = glGetUniformLocation(pDraw, "uViewport")
+
+    while (!glfwWindowShouldClose(win)) {
+        glfwPollEvents()
+
+        // === STEP ===
+        // 0) reset root + константы (bodyCount не трогаем)
+        glUseProgram(pReset)
+        glUniform2d(uWinReset, Cfg.WIDTH.toDouble(), Cfg.HEIGHT.toDouble())
+        glDispatchCompute(1,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        var g = groups(drawCount)
+
+        // 1) build
+        glUseProgram(pBuild)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        // 2) mass bottom-up (фикс. максимум уровней)
+        glUseProgram(pMass)
+        for (lvl in 24 downTo 0) {
+            glUniform1i(uLevelMass, lvl)
+            glDispatchCompute(groups(Cfg.MAX_NODES),1,1)
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+        }
+
+        // 3) accel @ t
+        glUseProgram(pAccel)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        // 4) kick half
+        glUseProgram(pKick)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        // 5) drift
+        glUseProgram(pDrift)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        // 6) rebuild for t+dt
+        glUseProgram(pReset)
+        glUniform2d(uWinReset, Cfg.WIDTH.toDouble(), Cfg.HEIGHT.toDouble())
+        glDispatchCompute(1,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        glUseProgram(pBuild)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        glUseProgram(pMass)
+        for (lvl in 24 downTo 0) {
+            glUniform1i(uLevelMass, lvl)
+            glDispatchCompute(groups(Cfg.MAX_NODES),1,1)
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+        }
+
+        // 7) accel @ t+dt
+        glUseProgram(pAccel)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        // 8) kick half
+        glUseProgram(pKick)
+        glDispatchCompute(g,1,1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+        // 9) merge + compaction
+        if (Cfg.MERGE_MIN_DIST > 0.0) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboVictims)
+            glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32I, GL_RED_INTEGER, GL_INT, null as java.nio.ByteBuffer?)
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboLocks)
+            glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32I, GL_RED_INTEGER, GL_INT, null as java.nio.ByteBuffer?)
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+
+            glUseProgram(pMerge)
+            glDispatchCompute(g,1,1)
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+            glUseProgram(pCompact)
+            glDispatchCompute(g,1,1)
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+            // Обновим drawCount из Globals (только для количества точек)
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboGlobals)
+            val map = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 64, GL_MAP_READ_BIT)
+            map?.order(java.nio.ByteOrder.nativeOrder())
+            val bodyCount = map?.asIntBuffer()?.get(1) ?: drawCount
+            glUnmapBuffer(GL_SHADER_STORAGE_BUFFER)
+            drawCount = bodyCount
+            g = groups(drawCount)
+        }
+
+        // === RENDER ===
+        glViewport(0,0, Cfg.WIDTH, Cfg.HEIGHT)
+        glClearColor(0f,0f,0f,1f)
+        glClear(GL_COLOR_BUFFER_BIT)
+
+        glUseProgram(pDraw)
+        glUniform2f(uViewport, Cfg.WIDTH.toFloat(), Cfg.HEIGHT.toFloat())
+        glBindVertexArray(vao)
+        glDrawArrays(GL_POINTS, 0, drawCount)
+        glBindVertexArray(0)
+
+        glfwSwapBuffers(win)
+    }
+
+    glfwTerminate()
 }
