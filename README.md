@@ -6,7 +6,7 @@ Visualization of gravitational dynamics using the Barnes–Hut algorithm impleme
 
 ## Quick Start
 
-1. Install JDK 18 (Temurin or any compatible distribution will do).
+1. Install JDK 24 (Temurin or any compatible distribution will do).
 2. Build the project via Gradle Wrapper:
    ```bash
    ./gradlew run
