@@ -10,24 +10,70 @@ import kotlin.math.*
 import kotlin.random.Random
 
 /**
- * Global configuration for window, physics, and rendering parameters.
+ * Global configuration for windowing, compute, physics, rendering, and galaxy generation defaults.
  */
 private object Config {
+
+    // --- Window / GL context ---
+
+    /** Window width in pixels for the GLFW context. */
     const val WIDTH = 3440
+
+    /** Window height in pixels for the GLFW context. */
     const val HEIGHT = 1440
+
+
+    // --- Compute / workgroup ---
+
+    /** Local workgroup size for the compute shader (x-dimension). */
     const val WORK_GROUP_SIZE = 256
+
+
+    // --- Physics parameters ---
+
+    /** Gravitational constant scale used by the compute shader. */
     const val G = 80.0f
+
+    /** Fixed physics timestep (seconds). */
     const val DT = 0.005f
+
+    /** Plummer-like softening length (added as soft^2 to distance^2). */
     const val SOFTENING = 1.0f
+
+
+    // --- Rendering parameters ---
+
+    /** Base GL point size (in pixels) before mass scaling. */
     const val POINT_SIZE = 1f
+
+    /** Additional size contribution per unit of mass (0 disables mass-based sizing). */
     const val MASS_POINT_SCALE = 0.0f
+
+    /** Dark background flag (true for dark gray, false for white). */
     const val BACKGROUND_DARK = true
+
+
+    // --- Convenience (double-precision mirrors) ---
+
+    /** Width in pixels as Double (for helpers that prefer doubles). */
     const val WIDTH_PX = WIDTH.toDouble()
+
+    /** Height in pixels as Double (for helpers that prefer doubles). */
     const val HEIGHT_PX = HEIGHT.toDouble()
+
+
+    // --- Galaxy generation defaults (makeGalaxyDisk) ---
+
+    /** Minimum orbital radius clamp to avoid singularities (pixels). */
     const val MIN_R = 2.0
+
+    /** Mass of the central body used by disk galaxy generator. */
     const val CENTRAL_MASS = 5_000.0
+
+    /** Total mass distributed across satellite bodies in the disk galaxy. */
     const val TOTAL_SATELLITE_MASS = 25_000.0
 }
+
 
 /**
  * Immutable body definition used for CPU-side generation and upload.
