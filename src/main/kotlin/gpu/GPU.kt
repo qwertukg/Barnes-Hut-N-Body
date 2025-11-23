@@ -1,4 +1,3 @@
-@file:JvmName("GpuNBodySSBORender")
 package gpu
 
 import org.lwjgl.glfw.GLFW.*
@@ -6,85 +5,175 @@ import org.lwjgl.glfw.GLFWErrorCallback
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL46.*
 import org.lwjgl.system.MemoryUtil.*
-import kotlin.math.*
-import kotlin.random.Random
+import java.io.File
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
- * Global configuration for windowing, compute, physics, rendering, and galaxy generation defaults.
+ * Global configuration for windowing, physics, rendering, camera,
+ * and data input (NEO catalog) used by the N-body demo.
  */
 private object Config {
 
-    // --- Window / GL context ---
+    // ---- Window / GL context ------------------------------------------------
 
     /** Window width in pixels for the GLFW context. */
-    const val WIDTH = 3440
+    const val WIDTH: Int = 3440
 
     /** Window height in pixels for the GLFW context. */
-    const val HEIGHT = 1440
+    const val HEIGHT: Int = 1440
 
 
-    // --- Compute / workgroup ---
+    // ---- Compute / workgroup ------------------------------------------------
 
-    /** Local workgroup size for the compute shader (x-dimension). */
-    const val WORK_GROUP_SIZE = 256
-
-
-    // --- Physics parameters ---
-
-    /** Gravitational constant scale used by the compute shader. */
-    const val G = 80.0f
-
-    /** Fixed physics timestep (seconds). */
-    const val DT = 0.005f
-
-    /** Plummer-like softening length (added as soft^2 to distance^2). */
-    const val SOFTENING = 1.0f
+    /**
+     * Local workgroup size in X dimension for the compute shader.
+     *
+     * Must match `layout(local_size_x = WORK_GROUP_SIZE)` in the GLSL code.
+     */
+    const val WORK_GROUP_SIZE: Int = 256
 
 
-    // --- Rendering parameters ---
+    // ---- Physics parameters -------------------------------------------------
 
-    /** Base GL point size (in pixels) before mass scaling. */
-    const val POINT_SIZE = 1f
+    /**
+     * Gravitational constant scale used by the compute shader.
+     *
+     * Units are internal to the simulation and chosen to give stable orbits.
+     */
+    const val G: Float = 80.0f
 
-    /** Additional size contribution per unit of mass (0 disables mass-based sizing). */
-    const val MASS_POINT_SCALE = 0.0f
+    /**
+     * Fixed physics timestep for the integrator (seconds in simulation units).
+     */
+    const val DT: Float = 0.01f
 
-    /** Dark background flag (true for dark gray, false for white). */
-    const val BACKGROUND_DARK = true
-
-
-    // --- Convenience (double-precision mirrors) ---
-
-    /** Width in pixels as Double (for helpers that prefer doubles). */
-    const val WIDTH_PX = WIDTH.toDouble()
-
-    /** Height in pixels as Double (for helpers that prefer doubles). */
-    const val HEIGHT_PX = HEIGHT.toDouble()
+    /**
+     * Plummer-like softening length.
+     *
+     * In the compute shader, `uSoftening` is used as `soft^2` added to r^2,
+     * so this value is effectively a length scale.
+     */
+    const val SOFTENING: Float = 1.0f
 
 
-    // --- Galaxy generation defaults (makeGalaxyDisk) ---
+    // ---- Legacy rendering parameters (не используются, но оставлены) -------
 
-    /** Minimum orbital radius clamp to avoid singularities (pixels). */
-    const val MIN_R = 2.0
+    /** Base OpenGL point size (in pixels). */
+    const val POINT_SIZE: Float = 5f
 
-    /** Mass of the central body used by disk galaxy generator. */
-    const val CENTRAL_MASS = 5_000.0
+    /** Additional point size contribution per unit of mass (unused). */
+    const val MASS_POINT_SCALE: Float = 0.0001f
 
-    /** Total mass distributed across satellite bodies in the disk galaxy. */
-    const val TOTAL_SATELLITE_MASS = 25_000.0
+    /** Whether to use a dark background (true) or white background (false). */
+    const val BACKGROUND_DARK: Boolean = true
+
+    /** Old speed→color scale (не используется). */
+    const val SPEED_COLOR_SCALE: Float = 1f / 10_000f
+
+
+    // ---- Mass / scale model -------------------------------------------------
+
+    /** Mass of the Earth in simulation units. */
+    const val EARTH_MASS: Float = 1f
+
+    /** Ratio of the Sun mass to Earth mass. */
+    const val SUN_EARTH_MASS_RATIO: Float = 333_000f
+
+    /** Mass of the Sun in simulation units. */
+    const val SUN_MASS: Float = EARTH_MASS * SUN_EARTH_MASS_RATIO
+
+    /**
+     * Fraction of the minimum screen dimension used as Earth's orbital radius.
+     *
+     * If min(W, H) is the smaller screen size in pixels, then
+     * Earth orbit radius = EARTH_ORBIT_FRACTION * min(W, H).
+     */
+    const val EARTH_ORBIT_FRACTION: Float = 0.25f
+
+
+    // ---- Camera parameters --------------------------------------------------
+
+    /**
+     * Fixed camera pitch angle in radians (rotation around X axis).
+     *
+     * Positive value tilts the camera downwards to see the orbital plane.
+     */
+    const val CAMERA_PITCH_RAD: Float = -0.2617994f // ~15 degrees
+
+    /**
+     * Camera yaw angular speed around the Y axis (radians per second).
+     *
+     * Set to 0.0f for a static camera.
+     */
+    const val CAMERA_SPEED: Float = 0.0f
+
+    /**
+     * Distance from camera to the center of the system (in simulation units).
+     */
+    const val CAMERA_DISTANCE: Float = 3000f
+
+    /**
+     * Vertical field of view for perspective projection (radians).
+     */
+    const val CAMERA_FOV_Y_RAD: Float = 0.7853982f // ~45 degrees
+
+    /** Near and far clipping planes for the perspective camera. */
+    const val CAMERA_NEAR: Float = 50f
+    const val CAMERA_FAR: Float = 10_000f
+
+
+    // ---- Per-body-type radii (world units, same scale as positions) --------
+
+    /** Sun radius in simulation units. */
+    const val SUN_RADIUS: Float = 40f
+
+    /** Earth radius in simulation units. */
+    const val EARTH_RADIUS: Float = 10f
+
+    /** Asteroid radius in simulation units. */
+    const val ASTEROID_RADIUS: Float = 2f
+
+
+    // ---- Per-body-type colors (RGB 0..1) -----------------------------------
+
+    /** Sun color (yellow-ish). */
+    val SUN_COLOR: FloatArray = floatArrayOf(1.0f, 0.9f, 0.1f)
+
+    /** Earth color (green-ish). */
+    val EARTH_COLOR: FloatArray = floatArrayOf(0.1f, 0.9f, 0.2f)
+
+    /** Asteroid color (neutral gray/white). */
+    val ASTEROID_COLOR: FloatArray = floatArrayOf(0.8f, 0.8f, 0.8f)
+
+
+    // ---- NEO catalog parameters --------------------------------------------
+
+    /** Path to the ESA NEO Keplerian elements catalog file (neo_kc.cat). */
+    const val NEO_FILE_PATH: String = "src/main/resources/neo_kc.cat"
+
+    /**
+     * 1-based index of the first line to read from the NEO catalog.
+     *
+     * All previous lines are treated as header/metadata.
+     */
+    const val NEO_START_LINE: Int = 6
 }
 
 
 /**
- * Immutable body definition used for CPU-side generation and upload.
+ * Body representation used on the CPU side and in the GPU SSBO.
  *
- * @property x X position.
- * @property y Y position.
- * @property z Z position.
- * @property vx X velocity.
- * @property vy Y velocity.
- * @property vz Z velocity.
- * @property m Mass.
+ * @property x X-coordinate of position.
+ * @property y Y-coordinate of position.
+ * @property z Z-coordinate of position.
+ * @property vx X-component of velocity.
+ * @property vy Y-component of velocity.
+ * @property vz Z-component of velocity.
+ * @property m Mass of the body in simulation units.
  */
 data class Body(
     var x: Float, var y: Float, var z: Float,
@@ -93,7 +182,7 @@ data class Body(
 )
 
 /**
- * Builds and links the compute shader program used for N-body simulation.
+ * Builds and links the compute shader program used for the N-body simulation.
  *
  * @return OpenGL program handle for the compute shader.
  * @throws IllegalStateException if compilation or linking fails.
@@ -187,71 +276,123 @@ struct Body { vec4 posMass; vec4 velPad; };
 layout(std430, binding = 0) buffer BodyBuffer { Body bodies[]; };
 
 uniform vec2  uViewport;
-uniform float uPointBase;
-uniform float uMassScale;
+
+// camera
 uniform float uCamAngle;
 uniform float uCamPitch;
+uniform float uCamRadius;
 uniform vec3  uCenter;
-uniform float uSpeedScale;
+uniform float uFovY;
+uniform float uNear;
+uniform float uFar;
 
-out float vSpeed;
+// body classification / radii
+uniform float uSunMass;
+uniform float uSunRadius;
+uniform float uEarthRadius;
+uniform float uAsteroidRadius;
+
 out float vMass;
 
 void main(){
     int id = gl_VertexID;
-    vec3 p = bodies[id].posMass.xyz;
-    vec3 v = bodies[id].velPad.xyz;
-    float m = bodies[id].posMass.w;
+    vec3 worldPos = bodies[id].posMass.xyz;
+    float m       = bodies[id].posMass.w;
 
-    vec3 q = p - uCenter;
+    // --- camera position (spherical around center) ---
+    float yaw   = uCamAngle;
+    float pitch = uCamPitch;
 
-    float ca = cos(uCamAngle);
-    float sa = sin(uCamAngle);
-    vec3 rY;
-    rY.x =  ca * q.x + sa * q.z;
-    rY.y =  q.y;
-    rY.z = -sa * q.x + ca * q.z;
+    float cy = cos(yaw);
+    float sy = sin(yaw);
+    float cp = cos(pitch);
+    float sp = sin(pitch);
 
-    float cp = cos(uCamPitch);
-    float sp = sin(uCamPitch);
-    vec3 pr;
-    pr.x = rY.x;
-    pr.y =  cp * rY.y - sp * rY.z;
-    pr.z =  sp * rY.y + cp * rY.z;
+    // forward from camera to center
+    vec3 forward = normalize(vec3(cy * cp, sp, sy * cp));
 
-    float x =  pr.x / (uViewport.x * 0.5);
-    float y = -pr.y / (uViewport.y * 0.5);
-    gl_Position = vec4(x, y, 0.0, 1.0);
+    // camera eye position
+    vec3 eye = uCenter - forward * uCamRadius;
 
-    gl_PointSize = max(1.0, uPointBase + uMassScale * m);
+    // view basis (right, up, -forward)
+    vec3 f  = normalize(uCenter - eye);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 s  = normalize(cross(f, up));
+    vec3 u  = cross(s, f);
 
-    vSpeed = length(v);
-    vMass  = m;
+    // world -> view
+    vec3 rel  = worldPos - eye;
+    vec3 view;
+    view.x = dot(rel, s);
+    view.y = dot(rel, u);
+    view.z = dot(rel, -f);  // negative in front of camera
+
+    // --- perspective projection ---
+    float aspect = uViewport.x / uViewport.y;
+    float fScale = 1.0 / tan(uFovY * 0.5);
+
+    float n = uNear;
+    float fa = uFar;
+
+    mat4 proj = mat4(
+        vec4(fScale / aspect, 0.0,  0.0,                      0.0),
+        vec4(0.0,             fScale, 0.0,                    0.0),
+        vec4(0.0,             0.0,   (fa + n) / (n - fa),    -1.0),
+        vec4(0.0,             0.0,   (2.0 * fa * n) / (n - fa), 0.0)
+    );
+
+    vec4 clip = proj * vec4(view, 1.0);
+    gl_Position = clip;
+
+    // --- choose physical radius by body type ---
+    float radius;
+    if (m > 0.5 * uSunMass) {
+        // Sun
+        radius = uSunRadius;
+    } else if (m > 0.0) {
+        // Earth-like mass
+        radius = uEarthRadius;
+    } else {
+        // Asteroids (massless test particles)
+        radius = uAsteroidRadius;
+    }
+
+    // perspective-correct size in pixels: size ∝ radius / distance
+    float dist = length(view);
+    float projScale = (uViewport.y * 0.5) / tan(uFovY * 0.5);
+    float sizePx = radius * projScale / max(dist, 1e-3);
+
+    gl_PointSize = max(sizePx, 1.0);
+    vMass = m;
 }
 """.trimIndent()
 
     val fs = """
 #version 460 core
-in float vSpeed;
 in float vMass;
 out vec4 fragColor;
 
-uniform float uSpeedScale;
+uniform float uSunMass;
+uniform vec3  uSunColor;
+uniform vec3  uEarthColor;
+uniform vec3  uAsteroidColor;
 
 void main(){
+    // круглый спрайт
     vec2 c = gl_PointCoord * 2.0 - 1.0;
     if (dot(c,c) > 1.0) discard;
 
-    float t = clamp(vSpeed * uSpeedScale, 0.0, 1.0) * 5.0;
-
-    const float W = 0.77;
-    vec3 white = vec3(1.0);
-    vec3 slow = mix(white, vec3(1.0, 1.0, 1.0), 1.0 - W);
-    vec3 mid  = mix(white, vec3(0.0, 1.0, 1.0), 1.0 - W);
-    vec3 fast = mix(white, vec3(0.65, 0.00, 0.95), 1.0 - W);
-
-    vec3 color = mix( mix(slow, mid, smoothstep(0.0, 0.5, t)),
-                      fast,         smoothstep(0.5, 1.0, t) );
+    vec3 color;
+    if (vMass > 0.5 * uSunMass) {
+        // Sun
+        color = uSunColor;
+    } else if (vMass > 0.0) {
+        // Earth
+        color = uEarthColor;
+    } else {
+        // Asteroids
+        color = uAsteroidColor;
+    }
 
     fragColor = vec4(color, 1.0);
 }
@@ -290,40 +431,60 @@ void main(){
 }
 
 /**
- * GPU N-body engine wrapper that manages SSBO storage, simulation, and rendering.
+ * GPU N-body engine wrapper that manages SSBO storage, simulation,
+ * and rendering of all bodies.
  *
- * @property count Number of bodies.
- * @property bodies Initial body list to upload.
+ * @property count Initial number of bodies.
+ * @property bodies Initial list of bodies to upload to the SSBO.
  */
 private class GpuNBodyRenderer(
     private var count: Int,
     bodies: List<Body>
 ) : AutoCloseable {
 
+    /** OpenGL SSBO handle storing all body data. */
     private val ssbo = glGenBuffers()
+
+    /** OpenGL VAO handle used for point rendering. */
     private val vao = glGenVertexArrays()
 
+    /** OpenGL program handle for the compute shader. */
     private val computeProg = buildComputeProgram()
+
+    /** OpenGL program handle for the render (vertex + fragment) shaders. */
     private val renderProg = buildRenderProgram()
 
+    // Uniform locations for the compute shader
     private val uDt      = glGetUniformLocation(computeProg, "uDt")
     private val uSoft    = glGetUniformLocation(computeProg, "uSoftening")
     private val uG       = glGetUniformLocation(computeProg, "uG")
     private val uCountC  = glGetUniformLocation(computeProg, "uCount")
 
-    private val uViewport  = glGetUniformLocation(renderProg, "uViewport")
-    private val uPointBase = glGetUniformLocation(renderProg, "uPointBase")
-    private val uMassScale = glGetUniformLocation(renderProg, "uMassScale")
-    private val uCamAngle  = glGetUniformLocation(renderProg, "uCamAngle")
-    private val uCenter    = glGetUniformLocation(renderProg, "uCenter")
-    private val uCamPitch = glGetUniformLocation(renderProg, "uCamPitch")
-    private val uSpeedScale = glGetUniformLocation(renderProg, "uSpeedScale")
+    // Uniform locations for the render shader
+    private val uViewport          = glGetUniformLocation(renderProg, "uViewport")
+    private val uCamAngle          = glGetUniformLocation(renderProg, "uCamAngle")
+    private val uCenter            = glGetUniformLocation(renderProg, "uCenter")
+    private val uCamPitch          = glGetUniformLocation(renderProg, "uCamPitch")
+    private val uCamRadius         = glGetUniformLocation(renderProg, "uCamRadius")
+    private val uFovY              = glGetUniformLocation(renderProg, "uFovY")
+    private val uNear              = glGetUniformLocation(renderProg, "uNear")
+    private val uFar               = glGetUniformLocation(renderProg, "uFar")
+    private val uSunMassR          = glGetUniformLocation(renderProg, "uSunMass")
+    private val uSunRadius         = glGetUniformLocation(renderProg, "uSunRadius")
+    private val uEarthRadius       = glGetUniformLocation(renderProg, "uEarthRadius")
+    private val uAsteroidRadius    = glGetUniformLocation(renderProg, "uAsteroidRadius")
+    private val uSunColor          = glGetUniformLocation(renderProg, "uSunColor")
+    private val uEarthColor        = glGetUniformLocation(renderProg, "uEarthColor")
+    private val uAsteroidColor     = glGetUniformLocation(renderProg, "uAsteroidColor")
 
-    private var capacityBytes = 0L
+    // старые, сейчас могут быть -1 (и по сути игнорируются)
+    private val uPointBase         = glGetUniformLocation(renderProg, "uPointBase")
+    private val uMassScale         = glGetUniformLocation(renderProg, "uMassScale")
+    private val uSpeedScale        = glGetUniformLocation(renderProg, "uSpeedScale")
 
-    /**
-     * Initializes GPU buffers and uploads initial bodies.
-     */
+    /** Current allocated SSBO size in bytes. */
+    private var capacityBytes: Long = 0L
+
     init {
         glBindVertexArray(vao)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
@@ -334,20 +495,7 @@ private class GpuNBodyRenderer(
     }
 
     /**
-     * Replaces the current body set with a new one and resizes GPU buffers if needed.
-     *
-     * @param newBodies New body list.
-     */
-    fun resizeBodies(newBodies: List<Body>) {
-        count = newBodies.size
-        ensureCapacity(count)
-        uploadBodies(newBodies)
-    }
-
-    /**
-     * Ensures SSBO capacity for at least [n] bodies.
-     *
-     * @param n Body count to accommodate.
+     * Ensures that the SSBO has enough storage for [n] bodies.
      */
     private fun ensureCapacity(n: Int) {
         val floatsPerBody = 8
@@ -361,9 +509,7 @@ private class GpuNBodyRenderer(
     }
 
     /**
-     * Uploads a body array to the SSBO.
-     *
-     * @param bodies Body list to upload.
+     * Uploads a list of [bodies] into the SSBO starting at offset 0.
      */
     private fun uploadBodies(bodies: List<Body>) {
         val n = bodies.size
@@ -379,13 +525,13 @@ private class GpuNBodyRenderer(
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
             glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, buf)
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
-        } finally { memFree(buf) }
+        } finally {
+            memFree(buf)
+        }
     }
 
     /**
-     * Computes center of mass by reading back SSBO contents.
-     *
-     * @return Center of mass as [x, y, z].
+     * Computes the center of mass of all bodies by reading back SSBO contents.
      */
     fun computeCenterOfMass(): FloatArray {
         if (count == 0) return floatArrayOf(0f, 0f, 0f)
@@ -396,28 +542,40 @@ private class GpuNBodyRenderer(
         try {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0L, buf)
-            var sx = 0.0; var sy = 0.0; var sz = 0.0; var sm = 0.0
+            var sx = 0.0
+            var sy = 0.0
+            var sz = 0.0
+            var sm = 0.0
             for (i in 0 until count) {
                 val base = i * floatsPerBody
                 val x = buf.get(base + 0).toDouble()
                 val y = buf.get(base + 1).toDouble()
                 val z = buf.get(base + 2).toDouble()
                 val m = buf.get(base + 3).toDouble()
-                sx += x * m; sy += y * m; sz += z * m; sm += m
+                sx += x * m
+                sy += y * m
+                sz += z * m
+                sm += m
             }
             if (sm == 0.0) return floatArrayOf(0f, 0f, 0f)
-            return floatArrayOf((sx/sm).toFloat(), (sy/sm).toFloat(), (sz/sm).toFloat())
-        } finally { memFree(buf) }
+            return floatArrayOf(
+                (sx / sm).toFloat(),
+                (sy / sm).toFloat(),
+                (sz / sm).toFloat()
+            )
+        } finally {
+            memFree(buf)
+        }
     }
 
     /**
-     * Executes one simulation step on the GPU.
-     *
-     * @param dt Time step.
-     * @param g Gravitational constant scale.
-     * @param softening Softening factor (distance squared added).
+     * Executes one simulation step on the GPU using the compute shader.
      */
-    fun simulate(dt: Float = Config.DT, g: Float = Config.G, softening: Float = Config.SOFTENING) {
+    fun simulate(
+        dt: Float = Config.DT,
+        g: Float = Config.G,
+        softening: Float = Config.SOFTENING
+    ) {
         if (count <= 0) return
         glUseProgram(computeProg)
         glUniform1f(uDt, dt)
@@ -432,34 +590,45 @@ private class GpuNBodyRenderer(
     }
 
     /**
-     * Renders all bodies as points with per-vertex size and color derived from mass and speed.
-     *
-     * @param viewportW Viewport width in pixels.
-     * @param viewportH Viewport height in pixels.
-     * @param camAngle Camera yaw angle in radians.
-     * @param center Center of mass to focus the camera on.
+     * Renders all bodies as GL points using the render shader.
      */
     fun render(viewportW: Int, viewportH: Int, camAngle: Float, center: FloatArray) {
         if (count <= 0) return
         glUseProgram(renderProg)
         glBindVertexArray(vao)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo)
+
         glUniform2f(uViewport, viewportW.toFloat(), viewportH.toFloat())
+        glUniform1f(uCamAngle, camAngle)
+        glUniform1f(uCamPitch, Config.CAMERA_PITCH_RAD)
+        glUniform3f(uCenter, center[0], center[1], center[2])
+        glUniform1f(uCamRadius, Config.CAMERA_DISTANCE)
+        glUniform1f(uFovY, Config.CAMERA_FOV_Y_RAD)
+        glUniform1f(uNear, Config.CAMERA_NEAR)
+        glUniform1f(uFar, Config.CAMERA_FAR)
+
+        glUniform1f(uSunMassR, Config.SUN_MASS)
+        glUniform1f(uSunRadius, Config.SUN_RADIUS)
+        glUniform1f(uEarthRadius, Config.EARTH_RADIUS)
+        glUniform1f(uAsteroidRadius, Config.ASTEROID_RADIUS)
+
+        Config.SUN_COLOR.also { glUniform3f(uSunColor, it[0], it[1], it[2]) }
+        Config.EARTH_COLOR.also { glUniform3f(uEarthColor, it[0], it[1], it[2]) }
+        Config.ASTEROID_COLOR.also { glUniform3f(uAsteroidColor, it[0], it[1], it[2]) }
+
+        // старые юниформы — будут -1 и просто проигнорируются
         glUniform1f(uPointBase, Config.POINT_SIZE)
         glUniform1f(uMassScale, Config.MASS_POINT_SCALE)
-        glUniform1f(uCamAngle, camAngle)
-        glUniform3f(uCenter, center[0], center[1], center[2])
+        glUniform1f(uSpeedScale, Config.SPEED_COLOR_SCALE)
+
         glEnable(GL_PROGRAM_POINT_SIZE)
-        glUniform1f(uCamPitch, 0.2617994f)
-        glUniform1f(uSpeedScale, 1f / 10_000f)
+        glEnable(GL_DEPTH_TEST)
+
         glDrawArrays(GL_POINTS, 0, count)
         glBindVertexArray(0)
         glUseProgram(0)
     }
 
-    /**
-     * Releases all GPU resources.
-     */
     override fun close() {
         glDeleteProgram(renderProg)
         glDeleteProgram(computeProg)
@@ -469,194 +638,194 @@ private class GpuNBodyRenderer(
 }
 
 /**
- * Generates a 2D disk of bodies with approximate tangential velocities.
- *
- * @param n Number of bodies.
- * @param w Width for positioning.
- * @param h Height for positioning.
- * @return List of bodies.
+ * Creates the base two-body system: a massive Sun and an Earth-like planet.
  */
-private fun generateDisk(n: Int, w: Int, h: Int): List<Body> {
-    val cx = w * 0.5f
-    val cy = h * 0.5f
-    val rMax = min(w, h) * 0.45f
-    val rnd = Random(1)
-    val out = ArrayList<Body>(n)
-    for (i in 0 until n) {
-        val r = rMax * sqrt(rnd.nextFloat())
-        val a = rnd.nextFloat() * (2f * Math.PI).toFloat()
-        val x = cx + r * cos(a)
-        val y = cy + r * sin(a)
-        val z = 1.0f + rnd.nextFloat() * 10.0f
-        val v = 50f / max(10f, r)
-        val vx = -v * sin(a)
-        val vy =  v * cos(a)
-        val m = 1.0f + rnd.nextFloat() * 2.0f
-        out += Body(x, y, z, vx, vy, 0f, m)
-    }
-    return out
-}
-
-/**
- * Generates a 3D spherical volume distribution with tangential velocities and a central massive body.
- *
- * @param n Number of satellite bodies (approximate; one extra central mass is added).
- * @param w Width reference for positioning.
- * @param h Height reference for positioning.
- * @return List of bodies including a central massive body.
- */
-private fun generateSphere(n: Int, w: Int, h: Int): List<Body> {
-    fun cross(ax: Float, ay: Float, az: Float, bx: Float, by: Float, bz: Float): Triple<Float, Float, Float> =
-        Triple(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
-
-    fun norm(x: Float, y: Float, z: Float): Triple<Float, Float, Float> {
-        val len = sqrt(x * x + y * y + z * z).coerceAtLeast(1e-8f)
-        return Triple(x / len, y / len, z / len)
-    }
+private fun createBase(): List<Body> {
+    val w = Config.WIDTH
+    val h = Config.HEIGHT
 
     val cx = w * 0.5f
     val cy = h * 0.5f
-    val cz = min(w, h) * 0.5f
-    val rMax = min(w, h) * 0.45f
-    val rnd = Random(1)
-    val out = ArrayList<Body>(n)
+    val cz = 0f
 
-    for (i in 0 until n) {
-        val r = rMax * cbrt(rnd.nextFloat().toDouble()).toFloat()
-        val z = rnd.nextFloat() * 2f - 1f
-        val phi = rnd.nextFloat() * (2f * Math.PI).toFloat()
-        val s = sqrt(max(0f, 1f - z * z))
-        val rx = s * cos(phi)
-        val ry = s * sin(phi)
-        val rz = z
-        val x = cx + r * rx
-        val y = cy + r * ry
-        val zPos = cz + r * rz
-        val speed = 300_000f / max(10f, r)
-        val az = 0f
-        val ax = if (abs(rz) > 0.99f) 1f else 0f
-        val ay = if (abs(rz) > 0.99f) 0f else 1f
-        val (tx0, ty0, tz0) = cross(rx, ry, rz, ax, ay, az)
-        val (tx, ty, tz) = norm(tx0, ty0, tz0)
-        val vx = tx * speed
-        val vy = ty * speed
-        val vz = tz * speed
-        val m = 1.0f
-        out += Body(x, y, zPos, vx, vy, vz, m)
-    }
-    return out + Body(cx, cy, cz, 0f, 0f, 0f, 5_000_000f)
+    val r = (min(w, h) * Config.EARTH_ORBIT_FRACTION).toFloat()
+
+    val earthMass = Config.EARTH_MASS
+    val sunMass = Config.SUN_MASS
+
+    val earthSpeed = sqrt((Config.G * sunMass / r).toDouble()).toFloat()
+
+    val sunVz = -earthSpeed * (earthMass / sunMass)
+
+    val sun = Body(
+        x = cx,
+        y = cy,
+        z = cz,
+        vx = 0f,
+        vy = 0f,
+        vz = sunVz,
+        m = sunMass
+    )
+
+    val earth = Body(
+        x = cx + r,
+        y = cy,
+        z = cz,
+        vx = 0f,
+        vy = 0f,
+        vz = earthSpeed,
+        m = earthMass
+    )
+
+    return listOf(sun, earth)
 }
 
-/**
- * Generates a rotationally supported disk galaxy with optional bar-like perturbation and jitter.
- *
- * The first body is the central mass; the rest are satellites whose velocities are assigned
- * to approximate circular motion from the enclosed mass profile.
- *
- * @param nTotal Total number of bodies including the central mass.
- * @param epsM2 Bar-like m=2 perturbation amplitude (dimensionless).
- * @param phi0 Phase of the m=2 perturbation in radians.
- * @param barTaperR Gaussian taper radius for the bar influence; null to auto.
- * @param radialScale Exponential scale length for radial distribution; null to auto.
- * @param speedJitter Fractional speed noise around circular speed.
- * @param radialJitter Fractional radial velocity jitter relative to circular speed.
- * @param clockwise Rotation direction.
- * @param rng Random generator.
- * @param vx Global X velocity offset.
- * @param vy Global Y velocity offset.
- * @param x Center X coordinate.
- * @param y Center Y coordinate.
- * @param r Maximum disk radius.
- * @param minR Minimum radius clamp.
- * @param centralMass Mass of the central body.
- * @param totalSatelliteMass Total mass distributed among satellites.
- * @return Mutable list of bodies (central + satellites).
- */
-fun makeGalaxyDisk(
-    nTotal: Int,
-    epsM2: Double = 0.03,
-    phi0: Double = 0.0,
-    barTaperR: Double? = null,
-    radialScale: Double? = null,
-    speedJitter: Double = 0.01,
-    radialJitter: Double = 0.0,
-    clockwise: Boolean = true,
-    rng: Random = Random(Random.nextLong()),
-    vx: Double = 0.0, vy: Double = 0.0,
-    x: Double = Config.WIDTH_PX * 0.5,
-    y: Double = Config.HEIGHT_PX * 0.5,
-    r: Double = 200.0,
-    minR: Double = Config.MIN_R,
-    centralMass: Double = Config.CENTRAL_MASS,
-    totalSatelliteMass: Double = Config.TOTAL_SATELLITE_MASS
-): MutableList<Body> {
-    val cx = x
-    val cy = y
-    val rMax = r
-    val sats = (nTotal - 1).coerceAtLeast(0)
-    val bodies = ArrayList<Body>(sats + 1)
+private fun degToRad(d: Double): Double = d * PI / 180.0
 
-    bodies += Body(cx.toFloat(), cy.toFloat(), 0f, vx.toFloat(), vy.toFloat(), 0f, centralMass.toFloat())
-
-    val mSat = if (sats > 0) totalSatelliteMass / sats else 0.0
-    val Rd = radialScale ?: (rMax / 3.0)
-    val taperR = barTaperR ?: (rMax * 0.6)
-
-    fun sampleExpRadius(): Double {
-        val u = rng.nextDouble()
-        val A = exp(-(rMax - minR) / Rd)
-        val t = 1 - u * (1 - A)
-        return minR - Rd * ln(t)
+private fun solveKeplerE(M: Double, e: Double, iters: Int = 16): Double {
+    var E = M
+    repeat(iters) {
+        val f = E - e * sin(E) - M
+        val fp = 1.0 - e * cos(E)
+        E -= f / fp
     }
+    return E
+}
 
-    repeat(sats) {
-        val R = sampleExpRadius().coerceIn(minR, rMax)
-        val theta = rng.nextDouble() * 2.0 * Math.PI
-        val taper = exp(- (R / taperR) * (R / taperR))
-        val R2 = R * (1.0 + epsM2 * cos(2.0 * (theta - phi0)) * taper)
-        val px = cx + R2 * cos(theta)
-        val py = cy + R2 * sin(theta)
-        bodies += Body(px.toFloat(), py.toFloat(), 0f, 0f, 0f, 0f, mSat.toFloat())
-    }
+private fun createAsteroidFromElements(
+    aAu: Double,
+    e: Double,
+    iDeg: Double,
+    longNodeDeg: Double,
+    argPericDeg: Double,
+    meanAnomalyDeg: Double,
+    sunMass: Float = Config.SUN_MASS
+): Body {
+    val rEarthSim = (min(Config.WIDTH, Config.HEIGHT) * Config.EARTH_ORBIT_FRACTION).toDouble()
+    val aSim = aAu * rEarthSim
 
-    data class RIdx(val i: Int, val r: Double)
-    val sorted = bodies.mapIndexed { i, b ->
-        RIdx(i, hypot(b.x.toDouble() - cx, b.y.toDouble() - cy))
-    }.sortedBy { it.r }
+    val i = degToRad(iDeg)
+    val Om = degToRad(longNodeDeg)
+    val w = degToRad(argPericDeg)
+    val M = degToRad(meanAnomalyDeg)
 
-    var acc = 0.0
-    val Menc = DoubleArray(bodies.size)
-    for (ri in sorted) { acc += bodies[ri.i].m.toDouble(); Menc[ri.i] = acc }
+    val E = solveKeplerE(M, e)
+    val cosE = cos(E)
+    val sinE = sin(E)
+    val sqrt1me2 = sqrt(1.0 - e * e)
 
-    for (i in 1 until bodies.size) {
-        val b = bodies[i]
-        val dx = b.x.toDouble() - cx
-        val dy = b.y.toDouble() - cy
-        val R = max(1e-6, hypot(dx, dy))
-        val vCirc = sqrt(Config.G.toDouble() * Menc[i] / R)
-        val v = vCirc * (1.0 + (rng.nextDouble() - 0.5) * 2.0 * speedJitter)
-        val (tx, ty) = if (clockwise) (dy / R) to (-dx / R) else (-dy / R) to (dx / R)
-        var vx0 = tx * v
-        var vy0 = ty * v
-        if (radialJitter > 0.0) {
-            val vr = (rng.nextDouble() - 0.5) * 2.0 * radialJitter * vCirc
-            vx0 += (dx / R) * vr
-            vy0 += (dy / R) * vr
+    val r = aSim * (1.0 - e * cosE)
+
+    val xP = aSim * (cosE - e)
+    val yP = aSim * (sqrt1me2 * sinE)
+
+    val mu = Config.G.toDouble() * sunMass.toDouble()
+
+    val factor = sqrt(mu * aSim) / r
+    val vxP = -factor * sinE
+    val vyP = factor * sqrt1me2 * cosE
+
+    val cO = cos(Om); val sO = sin(Om)
+    val ci = cos(i);  val si = sin(i)
+    val cw = cos(w);  val sw = sin(w)
+
+    val r11 =  cO * cw - sO * sw * ci
+    val r12 = -cO * sw - sO * cw * ci
+    val r21 =  sO * cw + cO * sw * ci
+    val r22 = -sO * sw + cO * cw * ci
+    val r31 =  sw * si
+    val r32 =  cw * si
+
+    val xE = r11 * xP + r12 * yP
+    val yE = r21 * xP + r22 * yP
+    val zE = r31 * xP + r32 * yP
+
+    val vxE = r11 * vxP + r12 * vyP
+    val vyE = r21 * vxP + r22 * vyP
+    val vzE = r31 * vxP + r32 * vyP
+
+    val xSim = xE
+    val ySim = zE
+    val zSim = yE
+    val vxSim = vxE
+    val vySim = vzE
+    val vzSim = vyE
+
+    val cx = Config.WIDTH * 0.5f
+    val cy = Config.HEIGHT * 0.5f
+    val cz = 0f
+
+    val mAst = 0f
+
+    return Body(
+        x = (cx + xSim).toFloat(),
+        y = (cy + ySim).toFloat(),
+        z = (cz + zSim).toFloat(),
+        vx = vxSim.toFloat(),
+        vy = vySim.toFloat(),
+        vz = vzSim.toFloat(),
+        m = mAst
+    )
+}
+
+private fun createAsteroidFromNeoLine(line: String): Body {
+    val trimmed = line.trim()
+    require(!trimmed.startsWith("!")) { "Header/comment line passed to createAsteroidFromNeoLine" }
+    val p = trimmed.split(Regex("\\s+"))
+    require(p.size >= 11) { "Expected at least 11 columns, got: ${p.size}" }
+
+    val aAu = p[2].toDouble()
+    val e = p[3].toDouble()
+    val iDeg = p[4].toDouble()
+    val longNodeDeg = p[5].toDouble()
+    val argPericDeg = p[6].toDouble()
+    val meanAnomalyDeg = p[7].toDouble()
+
+    return createAsteroidFromElements(
+        aAu = aAu,
+        e = e,
+        iDeg = iDeg,
+        longNodeDeg = longNodeDeg,
+        argPericDeg = argPericDeg,
+        meanAnomalyDeg = meanAnomalyDeg
+    )
+}
+
+fun readLinesFrom(path: String, startLine: Int = Config.NEO_START_LINE): List<String> {
+    require(startLine >= 1) { "startLine must be >= 1" }
+
+    val file = File(path)
+    val result = mutableListOf<String>()
+
+    file.bufferedReader().use { reader ->
+        var current = 1
+        while (true) {
+            val line = reader.readLine() ?: break
+            if (current >= startLine) {
+                result += line
+            }
+            current++
         }
-        b.vx = (vx0 + vx).toFloat()
-        b.vy = (vy0 + vy).toFloat()
-        b.vz = 0f
     }
+    return result
+}
 
-    return bodies
+fun createWorld(): List<Body> {
+    val base = createBase()
+    val dataLines = readLinesFrom(Config.NEO_FILE_PATH)
+    val asteroids = dataLines
+        .filter { it.isNotBlank() && !it.trim().startsWith("!") }
+        .map { createAsteroidFromNeoLine(it) }
+    return base + asteroids
 }
 
 /**
- * Application entry point. Initializes OpenGL, spawns bodies, runs the simulation loop, and renders frames.
+ * Application entry point.
  */
 fun main() {
     GLFWErrorCallback.createPrint(System.err).set()
     if (!glfwInit()) error("GLFW init failed")
+
     glfwDefaultWindowHints()
     glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4)
@@ -664,21 +833,31 @@ fun main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE)
     glfwWindowHint(GLFW_SAMPLES, 0)
+    glfwWindowHint(GLFW_DEPTH_BITS, 24)
 
-    val window = glfwCreateWindow(Config.WIDTH, Config.HEIGHT, "GPU N-Body (SSBO render)", 0, 0)
+    val window = glfwCreateWindow(
+        Config.WIDTH,
+        Config.HEIGHT,
+        "GPU N-Body (SSBO render)",
+        0,
+        0
+    )
     if (window == 0L) {
         glfwTerminate()
         error("Failed to create window")
     }
+
     glfwMakeContextCurrent(window)
     glfwSwapInterval(0)
     GL.createCapabilities()
 
-    val N = 50_000
-    val bodies = generateSphere(N, Config.WIDTH, Config.HEIGHT)
+    glEnable(GL_DEPTH_TEST)
+
+    val bodies = createWorld()
+    val N = bodies.size
 
     var camAngle = 0.0f
-    val camSpeed = 0.25f
+    val camSpeed = Config.CAMERA_SPEED
 
     GpuNBodyRenderer(bodies.size, bodies).use { sim ->
         var paused = false
@@ -695,6 +874,7 @@ fun main() {
         var lastTime = glfwGetTime()
         var accTime = 0.0
         var frames = 0
+
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents()
 
@@ -712,7 +892,7 @@ fun main() {
             val bg = if (Config.BACKGROUND_DARK) 0.05f else 1.0f
             glViewport(0, 0, Config.WIDTH, Config.HEIGHT)
             glClearColor(bg, bg, bg, 1f)
-            glClear(GL_COLOR_BUFFER_BIT)
+            glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
 
             sim.render(Config.WIDTH, Config.HEIGHT, camAngle, center)
 
@@ -721,7 +901,10 @@ fun main() {
             frames++
             accTime += (glfwGetTime() - now)
             if (accTime >= 1.0) {
-                glfwSetWindowTitle(window, "GPU N-Body (SSBO render)  |  ${frames} FPS  |  N=$N")
+                glfwSetWindowTitle(
+                    window,
+                    "GPU N-Body (SSBO render)  |  ${frames} FPS  |  N=$N"
+                )
                 frames = 0
                 accTime = 0.0
             }
