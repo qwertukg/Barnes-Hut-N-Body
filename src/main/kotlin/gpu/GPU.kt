@@ -98,32 +98,39 @@ private object Config {
     // ---- Camera parameters --------------------------------------------------
 
     /**
-     * Fixed camera pitch angle in radians (rotation around X axis).
-     *
-     * Positive value tilts the camera downwards to see the orbital plane.
+     * Initial camera pitch angle in radians (rotation around X axis).
      */
     const val CAMERA_PITCH_RAD: Float = -0.2617994f // ~15 degrees
 
     /**
-     * Camera yaw angular speed around the Y axis (radians per second).
-     *
-     * Set to 0.0f for a static camera.
-     */
-    const val CAMERA_SPEED: Float = 0.0f
-
-    /**
-     * Distance from camera to the center of the system (in simulation units).
+     * Initial distance from camera to the center of the system.
      */
     const val CAMERA_DISTANCE: Float = 3000f
 
-    /**
-     * Vertical field of view for perspective projection (radians).
-     */
+    /** Min/max zoom distance. */
+    const val CAMERA_DISTANCE_MIN: Float = 800f
+    const val CAMERA_DISTANCE_MAX: Float = 3_000f
+
+    /** Yaw (A/D) and pitch (W/S) speeds, rad/sec. */
+    const val CAMERA_YAW_SPEED: Float = 0.7f
+    const val CAMERA_PITCH_SPEED: Float = 0.7f
+
+    /** Pitch limits, radians. */
+    const val CAMERA_PITCH_MIN_RAD: Float = -1.2f   // ~ -69°
+    const val CAMERA_PITCH_MAX_RAD: Float = 0.3f    // ~ +17°
+
+    /** Zoom factor per scroll step (fraction of distance). */
+    const val CAMERA_ZOOM_FACTOR_PER_SCROLL: Float = 0.1f
+
+    /** Vertical FOV (radians). */
     const val CAMERA_FOV_Y_RAD: Float = 0.7853982f // ~45 degrees
 
     /** Near and far clipping planes for the perspective camera. */
     const val CAMERA_NEAR: Float = 50f
     const val CAMERA_FAR: Float = 10_000f
+
+    /** Old auto-rotate speed (now unused, но оставлен). */
+    const val CAMERA_SPEED: Float = 0.0f
 
 
     // ---- Per-body-type radii (world units, same scale as positions) --------
@@ -147,7 +154,19 @@ private object Config {
     val EARTH_COLOR: FloatArray = floatArrayOf(0.1f, 0.9f, 0.2f)
 
     /** Asteroid color (neutral gray/white). */
-    val ASTEROID_COLOR: FloatArray = floatArrayOf(0.8f, 0.8f, 0.8f)
+    val ASTEROID_COLOR: FloatArray = floatArrayOf(1.0f, 1.0f, 1.0f)
+
+
+    // ---- Asteroid brightness falloff params --------------------------------
+
+    /** Минимальная яркость астероидов (на дальнем пределе). */
+    const val ASTEROID_MIN_BRIGHTNESS: Float = 0.1f
+
+    /** Максимальная яркость астероидов (рядом с камерой). */
+    const val ASTEROID_MAX_BRIGHTNESS: Float = 1.0f
+
+    /** Степень кривой яркости: 1.0 — линейно, >1 — сильнее гаснут вдали. */
+    const val ASTEROID_BRIGHTNESS_POWER: Float = 3.0f
 
 
     // ---- NEO catalog parameters --------------------------------------------
@@ -161,19 +180,15 @@ private object Config {
      * All previous lines are treated as header/metadata.
      */
     const val NEO_START_LINE: Int = 6
+
+    /** Количество сэмплов для MSAA (0 = выключен, 4 или 8 = включен). */
+    const val MSAA_SAMPLES: Int = 4
+
 }
 
 
 /**
  * Body representation used on the CPU side and in the GPU SSBO.
- *
- * @property x X-coordinate of position.
- * @property y Y-coordinate of position.
- * @property z Z-coordinate of position.
- * @property vx X-component of velocity.
- * @property vy Y-component of velocity.
- * @property vz Z-component of velocity.
- * @property m Mass of the body in simulation units.
  */
 data class Body(
     var x: Float, var y: Float, var z: Float,
@@ -183,9 +198,6 @@ data class Body(
 
 /**
  * Builds and links the compute shader program used for the N-body simulation.
- *
- * @return OpenGL program handle for the compute shader.
- * @throws IllegalStateException if compilation or linking fails.
  */
 private fun buildComputeProgram(): Int {
     val src = """
@@ -265,9 +277,6 @@ void main() {
 
 /**
  * Builds and links the render shader program (vertex + fragment) for point rendering.
- *
- * @return OpenGL program handle for the render pipeline.
- * @throws IllegalStateException if compilation or linking fails.
  */
 private fun buildRenderProgram(): Int {
     val vs = """
@@ -292,7 +301,13 @@ uniform float uSunRadius;
 uniform float uEarthRadius;
 uniform float uAsteroidRadius;
 
+// asteroid brightness params
+uniform float uAsteroidMinBrightness;
+uniform float uAsteroidMaxBrightness;
+uniform float uAsteroidBrightnessPower;
+
 out float vMass;
+out float vBrightness;
 
 void main(){
     int id = gl_VertexID;
@@ -327,6 +342,9 @@ void main(){
     view.y = dot(rel, u);
     view.z = dot(rel, -f);  // negative in front of camera
 
+    // расстояние до камеры в view-пространстве
+    float dist = length(view);
+
     // --- perspective projection ---
     float aspect = uViewport.x / uViewport.y;
     float fScale = 1.0 / tan(uFovY * 0.5);
@@ -358,18 +376,25 @@ void main(){
     }
 
     // perspective-correct size in pixels: size ∝ radius / distance
-    float dist = length(view);
     float projScale = (uViewport.y * 0.5) / tan(uFovY * 0.5);
     float sizePx = radius * projScale / max(dist, 1e-3);
 
     gl_PointSize = max(sizePx, 1.0);
     vMass = m;
+
+    // яркость для астероидов: ближе -> светлее, дальше -> темнее
+    float t = (dist - uNear) / (uFar - uNear);
+    t = clamp(t, 0.0, 1.0);
+
+    float w = pow(1.0 - t, uAsteroidBrightnessPower);
+    vBrightness = mix(uAsteroidMinBrightness, uAsteroidMaxBrightness, w);
 }
 """.trimIndent()
 
     val fs = """
 #version 460 core
 in float vMass;
+in float vBrightness;
 out vec4 fragColor;
 
 uniform float uSunMass;
@@ -384,14 +409,11 @@ void main(){
 
     vec3 color;
     if (vMass > 0.5 * uSunMass) {
-        // Sun
         color = uSunColor;
     } else if (vMass > 0.0) {
-        // Earth
         color = uEarthColor;
     } else {
-        // Asteroids
-        color = uAsteroidColor;
+        color = uAsteroidColor * vBrightness;
     }
 
     fragColor = vec4(color, 1.0);
@@ -433,39 +455,29 @@ void main(){
 /**
  * GPU N-body engine wrapper that manages SSBO storage, simulation,
  * and rendering of all bodies.
- *
- * @property count Initial number of bodies.
- * @property bodies Initial list of bodies to upload to the SSBO.
  */
 private class GpuNBodyRenderer(
     private var count: Int,
     bodies: List<Body>
 ) : AutoCloseable {
 
-    /** OpenGL SSBO handle storing all body data. */
     private val ssbo = glGenBuffers()
-
-    /** OpenGL VAO handle used for point rendering. */
     private val vao = glGenVertexArrays()
-
-    /** OpenGL program handle for the compute shader. */
     private val computeProg = buildComputeProgram()
-
-    /** OpenGL program handle for the render (vertex + fragment) shaders. */
     private val renderProg = buildRenderProgram()
 
-    // Uniform locations for the compute shader
+    // compute uniforms
     private val uDt      = glGetUniformLocation(computeProg, "uDt")
     private val uSoft    = glGetUniformLocation(computeProg, "uSoftening")
     private val uG       = glGetUniformLocation(computeProg, "uG")
     private val uCountC  = glGetUniformLocation(computeProg, "uCount")
 
-    // Uniform locations for the render shader
+    // render uniforms
     private val uViewport          = glGetUniformLocation(renderProg, "uViewport")
     private val uCamAngle          = glGetUniformLocation(renderProg, "uCamAngle")
-    private val uCenter            = glGetUniformLocation(renderProg, "uCenter")
     private val uCamPitch          = glGetUniformLocation(renderProg, "uCamPitch")
     private val uCamRadius         = glGetUniformLocation(renderProg, "uCamRadius")
+    private val uCenter            = glGetUniformLocation(renderProg, "uCenter")
     private val uFovY              = glGetUniformLocation(renderProg, "uFovY")
     private val uNear              = glGetUniformLocation(renderProg, "uNear")
     private val uFar               = glGetUniformLocation(renderProg, "uFar")
@@ -476,13 +488,15 @@ private class GpuNBodyRenderer(
     private val uSunColor          = glGetUniformLocation(renderProg, "uSunColor")
     private val uEarthColor        = glGetUniformLocation(renderProg, "uEarthColor")
     private val uAsteroidColor     = glGetUniformLocation(renderProg, "uAsteroidColor")
+    private val uAstMinBrightness  = glGetUniformLocation(renderProg, "uAsteroidMinBrightness")
+    private val uAstMaxBrightness  = glGetUniformLocation(renderProg, "uAsteroidMaxBrightness")
+    private val uAstBrightnessPow  = glGetUniformLocation(renderProg, "uAsteroidBrightnessPower")
 
-    // старые, сейчас могут быть -1 (и по сути игнорируются)
+    // старые юниформы (можно игнорировать, даже если -1)
     private val uPointBase         = glGetUniformLocation(renderProg, "uPointBase")
     private val uMassScale         = glGetUniformLocation(renderProg, "uMassScale")
     private val uSpeedScale        = glGetUniformLocation(renderProg, "uSpeedScale")
 
-    /** Current allocated SSBO size in bytes. */
     private var capacityBytes: Long = 0L
 
     init {
@@ -490,13 +504,11 @@ private class GpuNBodyRenderer(
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo)
         glBufferData(GL_SHADER_STORAGE_BUFFER, 0L, GL_DYNAMIC_DRAW)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+
         ensureCapacity(count)
         uploadBodies(bodies)
     }
 
-    /**
-     * Ensures that the SSBO has enough storage for [n] bodies.
-     */
     private fun ensureCapacity(n: Int) {
         val floatsPerBody = 8
         val bytes = n.toLong() * floatsPerBody * java.lang.Float.BYTES
@@ -508,9 +520,6 @@ private class GpuNBodyRenderer(
         }
     }
 
-    /**
-     * Uploads a list of [bodies] into the SSBO starting at offset 0.
-     */
     private fun uploadBodies(bodies: List<Body>) {
         val n = bodies.size
         if (n == 0) return
@@ -530,9 +539,6 @@ private class GpuNBodyRenderer(
         }
     }
 
-    /**
-     * Computes the center of mass of all bodies by reading back SSBO contents.
-     */
     fun computeCenterOfMass(): FloatArray {
         if (count == 0) return floatArrayOf(0f, 0f, 0f)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
@@ -568,9 +574,6 @@ private class GpuNBodyRenderer(
         }
     }
 
-    /**
-     * Executes one simulation step on the GPU using the compute shader.
-     */
     fun simulate(
         dt: Float = Config.DT,
         g: Float = Config.G,
@@ -589,10 +592,14 @@ private class GpuNBodyRenderer(
         glUseProgram(0)
     }
 
-    /**
-     * Renders all bodies as GL points using the render shader.
-     */
-    fun render(viewportW: Int, viewportH: Int, camAngle: Float, center: FloatArray) {
+    fun render(
+        viewportW: Int,
+        viewportH: Int,
+        camAngle: Float,
+        camPitch: Float,
+        camRadius: Float,
+        center: FloatArray
+    ) {
         if (count <= 0) return
         glUseProgram(renderProg)
         glBindVertexArray(vao)
@@ -600,9 +607,9 @@ private class GpuNBodyRenderer(
 
         glUniform2f(uViewport, viewportW.toFloat(), viewportH.toFloat())
         glUniform1f(uCamAngle, camAngle)
-        glUniform1f(uCamPitch, Config.CAMERA_PITCH_RAD)
+        glUniform1f(uCamPitch, camPitch)
+        glUniform1f(uCamRadius, camRadius)
         glUniform3f(uCenter, center[0], center[1], center[2])
-        glUniform1f(uCamRadius, Config.CAMERA_DISTANCE)
         glUniform1f(uFovY, Config.CAMERA_FOV_Y_RAD)
         glUniform1f(uNear, Config.CAMERA_NEAR)
         glUniform1f(uFar, Config.CAMERA_FAR)
@@ -616,7 +623,10 @@ private class GpuNBodyRenderer(
         Config.EARTH_COLOR.also { glUniform3f(uEarthColor, it[0], it[1], it[2]) }
         Config.ASTEROID_COLOR.also { glUniform3f(uAsteroidColor, it[0], it[1], it[2]) }
 
-        // старые юниформы — будут -1 и просто проигнорируются
+        glUniform1f(uAstMinBrightness, Config.ASTEROID_MIN_BRIGHTNESS)
+        glUniform1f(uAstMaxBrightness, Config.ASTEROID_MAX_BRIGHTNESS)
+        glUniform1f(uAstBrightnessPow, Config.ASTEROID_BRIGHTNESS_POWER)
+
         glUniform1f(uPointBase, Config.POINT_SIZE)
         glUniform1f(uMassScale, Config.MASS_POINT_SCALE)
         glUniform1f(uSpeedScale, Config.SPEED_COLOR_SCALE)
@@ -832,14 +842,18 @@ fun main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6)
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE)
-    glfwWindowHint(GLFW_SAMPLES, 0)
+    glfwWindowHint(GLFW_SAMPLES, Config.MSAA_SAMPLES)
     glfwWindowHint(GLFW_DEPTH_BITS, 24)
 
+    // определяем монитор и режим
+    val monitor = glfwGetPrimaryMonitor()
+    val videoMode = glfwGetVideoMode(monitor) ?: error("No video mode for primary monitor")
+
     val window = glfwCreateWindow(
-        Config.WIDTH,
-        Config.HEIGHT,
+        videoMode.width(),
+        videoMode.height(),
         "GPU N-Body (SSBO render)",
-        0,
+        monitor,
         0
     )
     if (window == 0L) {
@@ -851,30 +865,48 @@ fun main() {
     glfwSwapInterval(0)
     GL.createCapabilities()
 
+    if (Config.MSAA_SAMPLES > 0) {
+        glEnable(GL_MULTISAMPLE)
+    }
+
     glEnable(GL_DEPTH_TEST)
 
     val bodies = createWorld()
     val N = bodies.size
 
+    // состояние камеры
     var camAngle = 0.0f
-    val camSpeed = Config.CAMERA_SPEED
+    var camPitch = Config.CAMERA_PITCH_RAD
+    var camRadius = Config.CAMERA_DISTANCE
 
-    GpuNBodyRenderer(bodies.size, bodies).use { sim ->
-        var paused = false
+    var paused = false
 
-        glfwSetKeyCallback(window) { _, key, _, action, _ ->
-            if (action == GLFW_PRESS) {
-                when (key) {
-                    GLFW_KEY_ESCAPE -> glfwSetWindowShouldClose(window, true)
-                    GLFW_KEY_SPACE  -> paused = !paused
-                }
+    glfwSetKeyCallback(window) { _, key, _, action, _ ->
+        if (action == GLFW_PRESS) {
+            when (key) {
+                GLFW_KEY_ESCAPE -> glfwSetWindowShouldClose(window, true)
+                GLFW_KEY_SPACE  -> paused = !paused
             }
         }
+    }
 
-        var lastTime = glfwGetTime()
-        var accTime = 0.0
-        var frames = 0
+    // Зум на колёсико
+    glfwSetScrollCallback(window) { _, _, yoffset ->
+        if (yoffset != 0.0) {
+            val factor = 1.0f - Config.CAMERA_ZOOM_FACTOR_PER_SCROLL * yoffset.toFloat()
+            camRadius *= factor
+            camRadius = camRadius.coerceIn(
+                Config.CAMERA_DISTANCE_MIN,
+                Config.CAMERA_DISTANCE_MAX
+            )
+        }
+    }
 
+    var lastTime = glfwGetTime()
+    var accTime = 0.0
+    var frames = 0
+
+    GpuNBodyRenderer(bodies.size, bodies).use { sim ->
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents()
 
@@ -882,9 +914,27 @@ fun main() {
             val dtFrame = (now - lastTime).toFloat()
             lastTime = now
 
+            // вращение камеры WASD
+            if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+                camAngle += Config.CAMERA_YAW_SPEED * dtFrame
+            }
+            if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+                camAngle -= Config.CAMERA_YAW_SPEED * dtFrame
+            }
+            if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+                camPitch += Config.CAMERA_PITCH_SPEED * dtFrame
+            }
+            if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+                camPitch -= Config.CAMERA_PITCH_SPEED * dtFrame
+            }
+            camPitch = camPitch.coerceIn(
+                Config.CAMERA_PITCH_MIN_RAD,
+                Config.CAMERA_PITCH_MAX_RAD
+            )
+
             if (!paused) {
+                // фиксированный шаг как раньше — не трогаем гравитацию
                 sim.simulate(Config.DT)
-                camAngle += camSpeed * dtFrame
             }
 
             val center = sim.computeCenterOfMass()
@@ -894,7 +944,14 @@ fun main() {
             glClearColor(bg, bg, bg, 1f)
             glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
 
-            sim.render(Config.WIDTH, Config.HEIGHT, camAngle, center)
+            sim.render(
+                Config.WIDTH,
+                Config.HEIGHT,
+                camAngle,
+                camPitch,
+                camRadius,
+                center
+            )
 
             glfwSwapBuffers(window)
 
